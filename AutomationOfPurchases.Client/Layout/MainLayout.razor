@@ -1,0 +1,39 @@
+﻿@inherits LayoutComponentBase
+
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <a class="navbar-brand ms-3" href="/">AutomationOfPurchases</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse"
+            data-bs-target="#navbarNav" aria-controls="navbarNav"
+            aria-expanded="false" aria-label="Toggle navigation">
+        <span class="navbar-toggler-icon"></span>
+    </button>
+
+    <div class="collapse navbar-collapse" id="navbarNav">
+        <ul class="navbar-nav ms-auto">
+            <!-- Головна сторінка (Список повідомлень) -->
+            <li class="nav-item">
+                <NavLink class="nav-link" href="/">
+                    Повідомлення
+                </NavLink>
+            </li>
+
+            <!-- Створити заявку -->
+            <li class="nav-item">
+                <NavLink class="nav-link" href="/create-request">
+                    Створити заявку
+                </NavLink>
+            </li>
+
+            <!-- Мої заявки -->
+            <li class="nav-item">
+                <NavLink class="nav-link" href="/my-requests">
+                    Мої заявки
+                </NavLink>
+            </li>
+        </ul>
+    </div>
+</nav>
+
+<div class="container mt-4">
+    @Body
+</div>

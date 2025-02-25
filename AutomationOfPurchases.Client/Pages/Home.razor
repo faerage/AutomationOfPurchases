@@ -1,0 +1,36 @@
+﻿@page "/"
+
+<h3>Мої повідомлення</h3>
+
+@if (messages == null)
+{
+    <p>Завантаження...</p>
+}
+else if (messages.Count == 0)
+{
+    <p>Повідомлень поки немає.</p>
+}
+else
+{
+    <ul class="list-group">
+        @foreach (var msg in messages)
+        {
+            <li class="list-group-item">@msg</li>
+        }
+    </ul>
+}
+
+@code {
+    private List<string>? messages;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Тут можна викликати HttpClient, отримати список повідомлень з API
+        // Поки що "заглушка":
+        messages = new List<string>()
+        {
+            "Ви маєте нову відповідь від економіста",
+            "Запит №1234 затверджено"
+        };
+    }
+}

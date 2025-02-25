@@ -1,0 +1,60 @@
+﻿@page "/my-requests"
+
+<h3>Мої заявки</h3>
+
+@if (requests == null)
+{
+    <p>Завантаження...</p>
+}
+else if (!requests.Any())
+{
+    <p>У вас поки що немає створених заявок.</p>
+}
+else
+{
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>Назва</th>
+                <th>Опис</th>
+                <th>Статус</th>
+                <th>Дата створення</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var r in requests)
+            {
+                <tr>
+                    <td>@r.Title</td>
+                    <td>@r.Description</td>
+                    <td>@r.Status</td>
+                    <td>@r.CreationDate</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private List<RequestModel>? requests;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Завантажити з API:
+        // requests = await Http.GetFromJsonAsync<List<RequestModel>>("api/requests/my");
+        // Поки що заглушка:
+        requests = new List<RequestModel>
+        {
+            new RequestModel { Title = "Закупка канцтоварів", Description = "Потрібні олівці", Status="Очікує затвердження", CreationDate=DateTime.Now.AddDays(-1) },
+            new RequestModel { Title = "Закупка паперу", Description = "5000 аркушів А4", Status="Затверджено", CreationDate=DateTime.Now.AddDays(-2) }
+        };
+    }
+
+    class RequestModel
+    {
+        public string Title { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        public string Status { get; set; } = "Новий";
+        public DateTime CreationDate { get; set; }
+    }
+}

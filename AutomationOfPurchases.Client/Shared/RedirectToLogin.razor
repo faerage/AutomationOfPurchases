@@ -1,0 +1,9 @@
+﻿@inject NavigationManager Navigation
+
+@code {
+    protected override void OnInitialized()
+    {
+        // Просто перенаправляємо користувача на сторінку логіну
+        Navigation.NavigateTo("/login", true);
+    }
+}

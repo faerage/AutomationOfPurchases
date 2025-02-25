@@ -1,0 +1,33 @@
+﻿@page "/create-request"
+
+<h3>Створити нову заявку</h3>
+
+<EditForm Model="@newRequest" OnValidSubmit="@HandleValidSubmit">
+    <div class="mb-3">
+        <label class="form-label">Назва</label>
+        <InputText class="form-control" @bind-Value="@newRequest.Title" />
+    </div>
+    <div class="mb-3">
+        <label class="form-label">Опис</label>
+        <InputTextArea class="form-control" @bind-Value="@newRequest.Description" />
+    </div>
+
+    <button type="submit" class="btn btn-primary">Надіслати</button>
+</EditForm>
+
+@code {
+    private RequestModel newRequest = new();
+
+    private async Task HandleValidSubmit()
+    {
+        // Тут відправляємо newRequest на API, наприклад:
+        // await Http.PostAsJsonAsync("api/requests", newRequest);
+        // Потім можна показати повідомлення чи перейти на "Мої заявки"
+    }
+
+    class RequestModel
+    {
+        public string Title { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+    }
+}

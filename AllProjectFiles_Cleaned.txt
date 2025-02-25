@@ -1,0 +1,3166 @@
+--- File: appsettings.Development.json (Path: .\AutomationOfPurchases.API\appsettings.Development.json) ---
+
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  }
+}
+
+
+--- File: appsettings.json (Path: .\AutomationOfPurchases.API\appsettings.json) ---
+
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=localhost;Port=5432;Database=PurchasesDb;Username=postgres;Password=admin"
+  },
+  "JwtSettings": {
+    "SecretKey": "0123456789_ABCDEF_0123456789_ABC"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}
+
+
+--- File: Program.cs (Path: .\AutomationOfPurchases.API\Program.cs) ---
+
+using AutomationOfPurchases.API.Infrastructure.Seed;     // <- простір імен, де лежить DatabaseSeeder
+using AutomationOfPurchases.Shared.Models;               // <- простір імен, де лежить AppDbContext, AppUser
+using Microsoft.AspNetCore.Identity;                     // <- Identity
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowClient", policy =>
+    {
+        // Укажіть адреси клієнта, наприклад, http://localhost:7018 або https://localhost:7018
+        policy.WithOrigins("https://localhost:7018", "http://localhost:7018")
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+        // Якщо потрібно передавати Cookie чи Авторизацію з різних доменів, додайте:
+        // .AllowCredentials();
+    });
+});
+
+// 1) Зчитуємо рядок підключення з appsettings.json
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
+    ?? throw new InvalidOperationException("Connection string not found.");
+
+// 2) Налаштування DbContext (EF Core з PostgreSQL чи іншим SQL)
+builder.Services.AddDbContext<AppDbContext>(options =>
+{
+    options.UseNpgsql(connectionString);
+});
+
+// 3) Підключаємо ASP.NET Identity (AppUser + IdentityRole)
+builder.Services.AddIdentity<AppUser, IdentityRole>(options =>
+{
+    // Тут можна налаштувати правила щодо паролів, блокування і т.д.
+    // options.Password.RequireDigit = false;
+    // ...
+})
+.AddEntityFrameworkStores<AppDbContext>()
+.AddDefaultTokenProviders();
+
+// 4) Налаштування JWT-аутентифікації
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(cfg =>
+{
+    // Беремо секретний ключ із конфігурації
+    var secretKey = builder.Configuration["JwtSettings:SecretKey"];
+    var key = Encoding.UTF8.GetBytes(secretKey!);
+
+    cfg.SaveToken = true;
+    cfg.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = new SymmetricSecurityKey(key),
+
+        ValidateIssuer = false,   // або встановіть issuer, якщо треба
+        ValidateAudience = false, // або встановіть audience, якщо треба
+        ClockSkew = TimeSpan.Zero
+    };
+});
+
+// 5) Авторизація (якщо потрібні політики)
+builder.Services.AddAuthorization();
+
+// 6) Swagger, контролери, інші сервіси
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+// Створюємо й будуємо додаток
+var app = builder.Build();
+
+// 7) Створюємо scope і викликаємо Seeder (міграції + тестові користувачі)
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
+    var userManager = scope.ServiceProvider.GetRequiredService<UserManager<AppUser>>();
+
+    // Викликаємо метод сидування
+    await DatabaseSeeder.SeedTestDataAsync(dbContext, roleManager, userManager);
+}
+
+// 8) Використовуємо аутентифікацію та авторизацію
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+app.Run();
+
+
+--- File: AuthController.cs (Path: .\AutomationOfPurchases.API\Controllers\AuthController.cs) ---
+
+﻿using AutomationOfPurchases.Shared.Models;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
+using System.Security.Claims;
+using System.Text;
+using System.IdentityModel.Tokens.Jwt;
+
+namespace AutomationOfPurchases.API.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    public class AuthController : ControllerBase
+    {
+        private readonly UserManager<AppUser> _userManager;
+        private readonly IConfiguration _configuration;
+
+        public AuthController(
+            UserManager<AppUser> userManager,
+            IConfiguration configuration)
+        {
+            _userManager = userManager;
+            _configuration = configuration;
+        }
+
+        // POST: api/auth/login
+        [HttpPost("login")]
+        public async Task<IActionResult> Login(LoginModel model)
+        {
+            // 1. Знаходимо користувача за UserName
+            var user = await _userManager.FindByNameAsync(model.UserName);
+            if (user == null)
+                return Unauthorized("Invalid credentials.");
+
+            // 2. Перевіряємо пароль
+            var validPass = await _userManager.CheckPasswordAsync(user, model.Password);
+            if (!validPass)
+                return Unauthorized("Invalid credentials.");
+
+            // 3. Збираємо ролі
+            var roles = await _userManager.GetRolesAsync(user);
+
+            // 4. Генеруємо JWT
+            var token = GenerateJwtToken(user, roles);
+            return Ok(new { token });
+        }
+
+        private string GenerateJwtToken(AppUser user, IList<string> roles)
+        {
+            var secretKey = _configuration["JwtSettings:SecretKey"];
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey!));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+            var claims = new List<Claim>
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, user.Id),
+                new Claim(JwtRegisteredClaimNames.Email, user.Email ?? ""),
+                new Claim("fullName", user.FullName)
+            };
+
+            // Додаємо claims із ролями
+            foreach (var role in roles)
+            {
+                claims.Add(new Claim(ClaimTypes.Role, role));
+            }
+
+            var token = new JwtSecurityToken(
+                claims: claims,
+                expires: DateTime.UtcNow.AddHours(8),
+                signingCredentials: creds
+            );
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+    }
+
+    public class LoginModel
+    {
+        public string UserName { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+    }
+}
+
+
+--- File: UserController.cs (Path: .\AutomationOfPurchases.API\Controllers\UserController.cs) ---
+
+﻿using AutomationOfPurchases.API.Services;
+using AutomationOfPurchases.Shared.DTOs;
+using Microsoft.AspNetCore.Mvc;
+
+namespace AutomationOfPurchases.API.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    public class UserController : ControllerBase
+    {
+        private readonly IUserService _userService;
+
+        public UserController(IUserService userService)
+        {
+            _userService = userService;
+        }
+
+        [HttpGet("{id}")]
+        public async Task<ActionResult<UserDTO>> GetUser(int id)
+        {
+            var user = await _userService.GetByIdAsync(id);
+            if (user == null) return NotFound();
+            return Ok(user);
+        }
+
+        [HttpGet]
+        public async Task<ActionResult<IEnumerable<UserDTO>>> GetAllUsers()
+        {
+            var all = await _userService.GetAllAsync();
+            return Ok(all);
+        }
+
+        [HttpPost]
+        public async Task<ActionResult<UserDTO>> CreateUser(UserDTO dto)
+        {
+            var created = await _userService.CreateAsync(dto);
+            return CreatedAtAction(nameof(GetUser), new { id = created.UserId }, created);
+        }
+
+        [HttpPut("{id}")]
+        public async Task<IActionResult> UpdateUser(int id, UserDTO dto)
+        {
+            var success = await _userService.UpdateAsync(id, dto);
+            if (!success) return NotFound();
+            return NoContent();
+        }
+
+        [HttpDelete("{id}")]
+        public async Task<IActionResult> DeleteUser(int id)
+        {
+            var success = await _userService.DeleteAsync(id);
+            if (!success) return NotFound();
+            return NoContent();
+        }
+    }
+}
+
+
+--- File: DatabaseSeeder.cs (Path: .\AutomationOfPurchases.API\Infrastructure\Seed\DatabaseSeeder.cs) ---
+
+﻿using AutomationOfPurchases.Shared.Models;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+
+namespace AutomationOfPurchases.API.Infrastructure.Seed
+{
+    public static class DatabaseSeeder
+    {
+        /// <summary>
+        /// Застосовує міграції і створює дефолтні ролі + тестових користувачів.
+        /// </summary>
+        public static async Task SeedTestDataAsync(
+            AppDbContext db,
+            RoleManager<IdentityRole> roleManager,
+            UserManager<AppUser> userManager)
+        {
+            // 1) Застосовуємо міграції, якщо треба
+            db.Database.Migrate();
+
+            // 2) Створюємо ролі
+            var roles = new[] { "User", "DepartmentHead", "Economist", "WarehouseWorker" };
+            foreach (var roleName in roles)
+            {
+                if (!await roleManager.RoleExistsAsync(roleName))
+                {
+                    await roleManager.CreateAsync(new IdentityRole(roleName));
+                }
+            }
+
+            // 3) Створюємо тестових користувачів (по одному на кожну роль)
+            await CreateTestUserIfNotExists(userManager, "testUser", "User", "User123!", "Regular User");
+            await CreateTestUserIfNotExists(userManager, "testDept", "DepartmentHead", "Dept123!", "Department Head");
+            await CreateTestUserIfNotExists(userManager, "testEco", "Economist", "Eco123!", "Economist Person");
+            await CreateTestUserIfNotExists(userManager, "testWh", "WarehouseWorker", "Wh123!", "Warehouse Worker");
+        }
+
+        private static async Task CreateTestUserIfNotExists(
+            UserManager<AppUser> userManager,
+            string userName,
+            string roleName,
+            string password,
+            string fullName)
+        {
+            var existingUser = await userManager.FindByNameAsync(userName);
+            if (existingUser == null)
+            {
+                var user = new AppUser
+                {
+                    UserName = userName,
+                    Email = userName + "@test.com",
+                    FullName = fullName
+                };
+
+                var createResult = await userManager.CreateAsync(user, password);
+                if (createResult.Succeeded)
+                {
+                    await userManager.AddToRoleAsync(user, roleName);
+                    Console.WriteLine($"Test user '{userName}' created with role '{roleName}'.");
+                }
+                else
+                {
+                    var errors = string.Join("; ", createResult.Errors.Select(e => e.Description));
+                    Console.WriteLine($"Failed to create user '{userName}': {errors}");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"Test user '{userName}' already exists.");
+            }
+        }
+    }
+}
+
+
+--- File: launchSettings.json (Path: .\AutomationOfPurchases.API\Properties\launchSettings.json) ---
+
+﻿{
+  "$schema": "http://json.schemastore.org/launchsettings.json",
+  "iisSettings": {
+    "windowsAuthentication": false,
+    "anonymousAuthentication": true,
+    "iisExpress": {
+      "applicationUrl": "http://localhost:18804",
+      "sslPort": 0
+    }
+  },
+  "profiles": {
+    "http": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "applicationUrl": "http://localhost:5156",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    },
+    "IIS Express": {
+      "commandName": "IISExpress",
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
+
+
+--- File: GenericRepository.cs (Path: .\AutomationOfPurchases.API\Repositories\GenericRepository.cs) ---
+
+﻿using AutomationOfPurchases.Shared.Models;
+using Microsoft.EntityFrameworkCore;
+using System.Linq.Expressions;
+
+namespace AutomationOfPurchases.API.Repositories
+{
+    public class GenericRepository<T> : IGenericRepository<T> where T : class
+    {
+        protected readonly AppDbContext _context;
+        protected readonly DbSet<T> _dbSet;
+
+        public GenericRepository(AppDbContext context)
+        {
+            _context = context;
+            _dbSet = context.Set<T>();
+        }
+
+        public virtual async Task<T?> GetByIdAsync(int id)
+        {
+            return await _dbSet.FindAsync(id);
+        }
+
+        public virtual async Task<IEnumerable<T>> GetAllAsync()
+        {
+            return await _dbSet.ToListAsync();
+        }
+
+        public virtual async Task<IEnumerable<T>> FindAsync(Expression<Func<T, bool>> predicate)
+        {
+            return await _dbSet.Where(predicate).ToListAsync();
+        }
+
+        public virtual async Task AddAsync(T entity)
+        {
+            await _dbSet.AddAsync(entity);
+            // Збереження будемо робити у UnitOfWork (або робіть тут, якщо потрібно)
+        }
+
+        public virtual async Task AddRangeAsync(IEnumerable<T> entities)
+        {
+            await _dbSet.AddRangeAsync(entities);
+        }
+
+        public virtual async Task UpdateAsync(T entity)
+        {
+            // EF Core відслідковує зміни, якщо entity знаходиться у tracked state
+            // _dbSet.Update(entity); // за необхідності
+            await Task.CompletedTask;
+        }
+
+        public virtual async Task DeleteAsync(T entity)
+        {
+            _dbSet.Remove(entity);
+            await Task.CompletedTask;
+        }
+    }
+}
+
+
+--- File: IGenericRepository.cs (Path: .\AutomationOfPurchases.API\Repositories\IGenericRepository.cs) ---
+
+﻿using System.Linq.Expressions;
+
+namespace AutomationOfPurchases.API.Repositories
+{
+    public interface IGenericRepository<T> where T : class
+    {
+        Task<T?> GetByIdAsync(int id);
+        Task<IEnumerable<T>> GetAllAsync();
+        Task<IEnumerable<T>> FindAsync(Expression<Func<T, bool>> predicate);
+
+        Task AddAsync(T entity);
+        Task AddRangeAsync(IEnumerable<T> entities);
+
+        Task UpdateAsync(T entity);
+        Task DeleteAsync(T entity);
+    }
+}
+
+
+--- File: IRepositoryFactory.cs (Path: .\AutomationOfPurchases.API\Repositories\IRepositoryFactory.cs) ---
+
+﻿namespace AutomationOfPurchases.API.Repositories
+{
+    public interface IRepositoryFactory
+    {
+        IGenericRepository<TEntity> CreateRepository<TEntity>() where TEntity : class;
+    }
+}
+
+
+--- File: IUnitOfWork.cs (Path: .\AutomationOfPurchases.API\Repositories\IUnitOfWork.cs) ---
+
+﻿using System;
+
+namespace AutomationOfPurchases.API.Repositories
+{
+    public interface IUnitOfWork : IDisposable
+    {
+        // Приклад репозиторіїв для конкретних сутностей
+        IGenericRepository<AutomationOfPurchases.Shared.Models.AppUser> Users { get; }
+        IGenericRepository<AutomationOfPurchases.Shared.Models.Department> Departments { get; }
+        IGenericRepository<AutomationOfPurchases.Shared.Models.Request> Requests { get; }
+        // за потреби додати й інші, наприклад:
+        // IGenericRepository<Item> Items { get; }
+        // IGenericRepository<RequestItem> RequestItems { get; }
+
+        // Універсальне створення репозиторіїв через Factory, якщо потрібно:
+        IGenericRepository<TEntity> Repository<TEntity>() where TEntity : class;
+
+        // Основний метод збереження
+        Task<int> SaveChangesAsync();
+    }
+}
+
+
+--- File: RepositoryFactory.cs (Path: .\AutomationOfPurchases.API\Repositories\RepositoryFactory.cs) ---
+
+﻿using AutomationOfPurchases.Shared.Models;
+
+namespace AutomationOfPurchases.API.Repositories
+{
+    public class RepositoryFactory : IRepositoryFactory
+    {
+        private readonly AppDbContext _context;
+
+        public RepositoryFactory(AppDbContext context)
+        {
+            _context = context;
+        }
+
+        public IGenericRepository<TEntity> CreateRepository<TEntity>() where TEntity : class
+        {
+            return new GenericRepository<TEntity>(_context);
+        }
+    }
+}
+
+
+--- File: UnitOfWork.cs (Path: .\AutomationOfPurchases.API\Repositories\UnitOfWork.cs) ---
+
+﻿using AutomationOfPurchases.Shared.Models;
+
+namespace AutomationOfPurchases.API.Repositories
+{
+    public class UnitOfWork : IUnitOfWork
+    {
+        private readonly AppDbContext _context;
+        private readonly IRepositoryFactory _repositoryFactory;
+
+        // "кешовані" репозиторії
+        private IGenericRepository<AppUser>? _users;
+        private IGenericRepository<Department>? _departments;
+        private IGenericRepository<Request>? _requests;
+        // Додаткові поля для інших сутностей:
+        // private IGenericRepository<Item>? _items;
+
+        public UnitOfWork(AppDbContext context, IRepositoryFactory repositoryFactory)
+        {
+            _context = context;
+            _repositoryFactory = repositoryFactory;
+        }
+
+        public IGenericRepository<AppUser> Users
+            => _users ??= _repositoryFactory.CreateRepository<AppUser>();
+
+        public IGenericRepository<Department> Departments
+            => _departments ??= _repositoryFactory.CreateRepository<Department>();
+
+        public IGenericRepository<Request> Requests
+            => _requests ??= _repositoryFactory.CreateRepository<Request>();
+
+        // Якщо потрібен доступ до інших сутностей:
+        // public IGenericRepository<Item> Items => _items ??= _repositoryFactory.CreateRepository<Item>();
+
+        public IGenericRepository<TEntity> Repository<TEntity>() where TEntity : class
+        {
+            return _repositoryFactory.CreateRepository<TEntity>();
+        }
+
+        public async Task<int> SaveChangesAsync()
+        {
+            return await _context.SaveChangesAsync();
+        }
+
+        public void Dispose()
+        {
+            _context.Dispose();
+        }
+    }
+}
+
+
+--- File: IUserService.cs (Path: .\AutomationOfPurchases.API\Services\IUserService.cs) ---
+
+﻿using AutomationOfPurchases.Shared.DTOs;
+
+namespace AutomationOfPurchases.API.Services
+{
+    public interface IUserService
+    {
+        Task<UserDTO?> GetByIdAsync(int id);
+        Task<IEnumerable<UserDTO>> GetAllAsync();
+        Task<UserDTO> CreateAsync(UserDTO dto);
+        Task<bool> UpdateAsync(int id, UserDTO dto);
+        Task<bool> DeleteAsync(int id);
+    }
+}
+
+
+--- File: UserService.cs (Path: .\AutomationOfPurchases.API\Services\UserService.cs) ---
+
+﻿using AutomationOfPurchases.API.Repositories;
+using AutomationOfPurchases.Shared.DTOs;
+using AutomationOfPurchases.Shared.Models;
+using AutoMapper;
+
+namespace AutomationOfPurchases.API.Services
+{
+    public class UserService : IUserService
+    {
+        private readonly IUnitOfWork _unitOfWork;
+        private readonly IMapper _mapper;
+
+        public UserService(IUnitOfWork unitOfWork, IMapper mapper)
+        {
+            _unitOfWork = unitOfWork;
+            _mapper = mapper;
+        }
+
+        public async Task<UserDTO?> GetByIdAsync(int id)
+        {
+            var user = await _unitOfWork.Users.GetByIdAsync(id);
+            if (user == null) return null;
+
+            return _mapper.Map<UserDTO>(user);
+        }
+
+        public async Task<IEnumerable<UserDTO>> GetAllAsync()
+        {
+            var users = await _unitOfWork.Users.GetAllAsync();
+            return _mapper.Map<IEnumerable<UserDTO>>(users);
+        }
+
+        public async Task<UserDTO> CreateAsync(UserDTO dto)
+        {
+            // DTO -> Entity
+            var entity = _mapper.Map<AppUser>(dto);
+
+            await _unitOfWork.Users.AddAsync(entity);
+            await _unitOfWork.SaveChangesAsync(); // Зберігаємо, щоб отримати новий Id
+
+            // Повторний мап: Entity -> DTO з оновленим UserId
+            return _mapper.Map<UserDTO>(entity);
+        }
+
+        public async Task<bool> UpdateAsync(int id, UserDTO dto)
+        {
+            var user = await _unitOfWork.Users.GetByIdAsync(id);
+            if (user == null) return false;
+
+            // DTO -> (оновлюємо) user
+            _mapper.Map(dto, user);
+
+            // EF відслідковує user, тому можна просто викликати UpdateAsync
+            await _unitOfWork.Users.UpdateAsync(user);
+            await _unitOfWork.SaveChangesAsync();
+
+            return true;
+        }
+
+        public async Task<bool> DeleteAsync(int id)
+        {
+            var user = await _unitOfWork.Users.GetByIdAsync(id);
+            if (user == null) return false;
+
+            await _unitOfWork.Users.DeleteAsync(user);
+            await _unitOfWork.SaveChangesAsync();
+
+            return true;
+        }
+    }
+}
+
+
+--- File: UserProfile.cs (Path: .\AutomationOfPurchases.API\Services\Mappings\UserProfile.cs) ---
+
+﻿using AutoMapper;
+using AutomationOfPurchases.Shared.Models;
+using AutomationOfPurchases.Shared.DTOs;
+
+namespace AutomationOfPurchases.API.Services.Mappings
+{
+    public class UserProfile : Profile
+    {
+        public UserProfile()
+        {
+            // Відображення User -> UserDTO
+            CreateMap<AppUser, UserDTO>()
+                // За потреби можна налаштувати додаткові ForMember
+                .ReverseMap();
+            // ReverseMap() робить і зворотне мапування (UserDTO -> User)
+        }
+    }
+}
+
+
+--- File: App.razor (Path: .\AutomationOfPurchases.Client\App.razor) ---
+
+﻿<Router AppAssembly="@typeof(App).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+        <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+    </Found>
+    <NotFound>
+        <PageTitle>Not found</PageTitle>
+        <LayoutView Layout="@typeof(MainLayout)">
+            <p role="alert">Sorry, there's nothing at this address.</p>
+        </LayoutView>
+    </NotFound>
+</Router>
+
+
+--- File: Program.cs (Path: .\AutomationOfPurchases.Client\Program.cs) ---
+
+using AutomationOfPurchases.Client;
+using Microsoft.AspNetCore.Components.Web;
+using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
+
+var builder = WebAssemblyHostBuilder.CreateDefault(args);
+builder.RootComponents.Add<App>("#app");
+builder.RootComponents.Add<HeadOutlet>("head::after");
+
+builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri("http://localhost:5156") });
+
+await builder.Build().RunAsync();
+
+
+--- File: _Imports.razor (Path: .\AutomationOfPurchases.Client\_Imports.razor) ---
+
+﻿@using System.Net.Http
+@using System.Net.Http.Json
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.AspNetCore.Components.Routing
+@using Microsoft.AspNetCore.Components.Web
+@using Microsoft.AspNetCore.Components.Web.Virtualization
+@using Microsoft.AspNetCore.Components.WebAssembly.Http
+@using Microsoft.JSInterop
+@using AutomationOfPurchases.Client
+@using AutomationOfPurchases.Client.Layout
+
+
+--- File: MainLayout.razor (Path: .\AutomationOfPurchases.Client\Layout\MainLayout.razor) ---
+
+﻿@inherits LayoutComponentBase
+
+@Body
+
+
+--- File: Login.razor (Path: .\AutomationOfPurchases.Client\Pages\Login.razor) ---
+
+﻿@page "/login"
+@inject HttpClient Http
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+
+@using System.Net.Http.Json
+
+<h3>Login</h3>
+
+<div class="container my-4">
+    <div class="row">
+        <div class="col-md-5">
+            <EditForm Model="@credentials" OnValidSubmit="@HandleValidSubmit" class="p-3 border rounded">
+                <div class="mb-3">
+                    <label for="username" class="form-label">User Name</label>
+                    <InputText id="username" class="form-control" @bind-Value="@credentials.UserName" />
+                </div>
+
+                <div class="mb-3">
+                    <label for="password" class="form-label">Password</label>
+                    <InputText id="password" class="form-control" @bind-Value="@credentials.Password" type="password" />
+                </div>
+
+                <ValidationSummary />
+
+                <button type="submit" class="btn btn-primary">Log In</button>
+
+                @if (!string.IsNullOrEmpty(errorMessage))
+                {
+                    <div class="alert alert-danger mt-3">@errorMessage</div>
+                }
+            </EditForm>
+        </div>
+    </div>
+</div>
+
+@code {
+    // Модель, яку прив’язуємо до форми
+    private LoginRequest credentials = new LoginRequest();
+    private string? errorMessage;
+
+    // Спроба логіну
+    private async Task HandleValidSubmit()
+    {
+        try
+        {
+            errorMessage = null;
+
+            // Викликаємо Ваш API: POST /api/auth/login
+            var response = await Http.PostAsJsonAsync("api/auth/login", credentials);
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<LoginResponse>();
+                if (result is not null && !string.IsNullOrWhiteSpace(result.Token))
+                {
+                    // Зберігаємо токен у localStorage
+                    await JSRuntime.InvokeVoidAsync("localStorage.setItem", "authToken", result.Token);
+
+                    // Перенаправляємо на головну сторінку
+                    Navigation.NavigateTo("/");
+                }
+                else
+                {
+                    errorMessage = "No token returned.";
+                }
+            }
+            else
+            {
+                errorMessage = "Invalid credentials.";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error: {ex.Message}";
+        }
+    }
+
+    // DTO для запиту: що відправляємо на сервер
+    public class LoginRequest
+    {
+        public string UserName { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+    }
+
+    // DTO для відповіді: що повертає сервер
+    public class LoginResponse
+    {
+        public string Token { get; set; } = string.Empty;
+    }
+}
+
+
+--- File: launchSettings.json (Path: .\AutomationOfPurchases.Client\Properties\launchSettings.json) ---
+
+{
+  "$schema": "http://json.schemastore.org/launchsettings.json",
+  "iisSettings": {
+    "windowsAuthentication": false,
+    "anonymousAuthentication": true,
+    "iisExpress": {
+      "applicationUrl": "http://localhost:38109",
+      "sslPort": 44358
+    }
+  },
+  "profiles": {
+    "http": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "inspectUri": "{wsProtocol}://{url.hostname}:{url.port}/_framework/debug/ws-proxy?browser={browserInspectUri}",
+      "applicationUrl": "http://localhost:5249",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    },
+    "https": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "inspectUri": "{wsProtocol}://{url.hostname}:{url.port}/_framework/debug/ws-proxy?browser={browserInspectUri}",
+      "applicationUrl": "https://localhost:7018;http://localhost:5249",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    },
+    "IIS Express": {
+      "commandName": "IISExpress",
+      "launchBrowser": true,
+      "inspectUri": "{wsProtocol}://{url.hostname}:{url.port}/_framework/debug/ws-proxy?browser={browserInspectUri}",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
+
+
+--- File: icon-192.png (Path: .\AutomationOfPurchases.Client\wwwroot\icon-192.png) ---
+
+--- File: index.html (Path: .\AutomationOfPurchases.Client\wwwroot\index.html) ---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AutomationOfPurchases.Client</title>
+    <base href="/" />
+
+    <!-- Ваш app.css (якщо треба) -->
+    <link rel="stylesheet" href="css/app.css" />
+
+    <!-- **Bootstrap CSS** -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+</head>
+<body>
+    <div id="app">
+        <svg class="loading-progress">
+            <circle r="40%" cx="50%" cy="50%" />
+            <circle r="40%" cx="50%" cy="50%" />
+        </svg>
+        <div class="loading-progress-text"></div>
+    </div>
+
+    <div id="blazor-error-ui">
+        An unhandled error has occurred.
+        <a href="" class="reload">Reload</a>
+        <a class="dismiss">🗙</a>
+    </div>
+
+    <!-- Blazor WebAssembly Script -->
+    <script src="_framework/blazor.webassembly.js"></script>
+
+    <!-- **Bootstrap JS** -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+</body>
+</html>
+
+--- File: app.css (Path: .\AutomationOfPurchases.Client\wwwroot\css\app.css) ---
+
+.valid.modified:not([type=checkbox]) {
+    outline: 1px solid #26b050;
+}
+
+.invalid {
+    outline: 1px solid red;
+}
+
+.validation-message {
+    color: red;
+}
+
+#blazor-error-ui {
+    background: lightyellow;
+    bottom: 0;
+    box-shadow: 0 -1px 2px rgba(0, 0, 0, 0.2);
+    display: none;
+    left: 0;
+    padding: 0.6rem 1.25rem 0.7rem 1.25rem;
+    position: fixed;
+    width: 100%;
+    z-index: 1000;
+}
+
+    #blazor-error-ui .dismiss {
+        cursor: pointer;
+        position: absolute;
+        right: 0.75rem;
+        top: 0.5rem;
+    }
+
+.blazor-error-boundary {
+    background: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNTYiIGhlaWdodD0iNDkiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgeG1sbnM6eGxpbms9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkveGxpbmsiIG92ZXJmbG93PSJoaWRkZW4iPjxkZWZzPjxjbGlwUGF0aCBpZD0iY2xpcDAiPjxyZWN0IHg9IjIzNSIgeT0iNTEiIHdpZHRoPSI1NiIgaGVpZ2h0PSI0OSIvPjwvY2xpcFBhdGg+PC9kZWZzPjxnIGNsaXAtcGF0aD0idXJsKCNjbGlwMCkiIHRyYW5zZm9ybT0idHJhbnNsYXRlKC0yMzUgLTUxKSI+PHBhdGggZD0iTTI2My41MDYgNTFDMjY0LjcxNyA1MSAyNjUuODEzIDUxLjQ4MzcgMjY2LjYwNiA1Mi4yNjU4TDI2Ny4wNTIgNTIuNzk4NyAyNjcuNTM5IDUzLjYyODMgMjkwLjE4NSA5Mi4xODMxIDI5MC41NDUgOTIuNzk1IDI5MC42NTYgOTIuOTk2QzI5MC44NzcgOTMuNTEzIDI5MSA5NC4wODE1IDI5MSA5NC42NzgyIDI5MSA5Ny4wNjUxIDI4OS4wMzggOTkgMjg2LjYxNyA5OUwyNDAuMzgzIDk5QzIzNy45NjMgOTkgMjM2IDk3LjA2NTEgMjM2IDk0LjY3ODIgMjM2IDk0LjM3OTkgMjM2LjAzMSA5NC4wODg2IDIzNi4wODkgOTMuODA3MkwyMzYuMzM4IDkzLjAxNjIgMjM2Ljg1OCA5Mi4xMzE0IDI1OS40NzMgNTMuNjI5NCAyNTkuOTYxIDUyLjc5ODUgMjYwLjQwNyA1Mi4yNjU4QzI2MS4yIDUxLjQ4MzcgMjYyLjI5NiA1MSAyNjMuNTA2IDUxWk0yNjMuNTg2IDY2LjAxODNDMjYwLjczNyA2Ni4wMTgzIDI1OS4zMTMgNjcuMTI0NSAyNTkuMzEzIDY5LjMzNyAyNTkuMzEzIDY5LjYxMDIgMjU5LjMzMiA2OS44NjA4IDI1OS4zNzEgNzAuMDg4N0wyNjEuNzk1IDg0LjAxNjEgMjY1LjM4IDg0LjAxNjEgMjY3LjgyMSA2OS43NDc1QzI2Ny44NiA2OS43MzA5IDI2Ny44NzkgNjkuNTg3NyAyNjcuODc5IDY5LjMxNzkgMjY3Ljg3OSA2Ny4xMTgyIDI2Ni40NDggNjYuMDE4MyAyNjMuNTg2IDY2LjAxODNaTTI2My41NzYgODYuMDU0N0MyNjEuMDQ5IDg2LjA1NDcgMjU5Ljc4NiA4Ny4zMDA1IDI1OS43ODYgODkuNzkyMSAyNTkuNzg2IDkyLjI4MzcgMjYxLjA0OSA5My41Mjk1IDI2My41NzYgOTMuNTI5NSAyNjYuMTE2IDkzLjUyOTUgMjY3LjM4NyA5Mi4yODM3IDI2Ny4zODcgODkuNzkyMSAyNjcuMzg3IDg3LjMwMDUgMjY2LjExNiA4Ni4wNTQ3IDI2My41NzYgODYuMDU0N1oiIGZpbGw9IiNGRkU1MDAiIGZpbGwtcnVsZT0iZXZlbm9kZCIvPjwvZz48L3N2Zz4=) no-repeat 1rem/1.8rem, #b32121;
+    padding: 1rem 1rem 1rem 3.7rem;
+    color: white;
+}
+
+    .blazor-error-boundary::after {
+        content: "An error has occurred."
+    }
+
+.loading-progress {
+    position: relative;
+    display: block;
+    width: 8rem;
+    height: 8rem;
+    margin: 20vh auto 1rem auto;
+}
+
+    .loading-progress circle {
+        fill: none;
+        stroke: #e0e0e0;
+        stroke-width: 0.6rem;
+        transform-origin: 50% 50%;
+        transform: rotate(-90deg);
+    }
+
+        .loading-progress circle:last-child {
+            stroke: #1b6ec2;
+            stroke-dasharray: calc(3.141 * var(--blazor-load-percentage, 0%) * 0.8), 500%;
+            transition: stroke-dasharray 0.05s ease-in-out;
+        }
+
+.loading-progress-text {
+    position: absolute;
+    text-align: center;
+    font-weight: bold;
+    inset: calc(20vh + 3.25rem) 0 auto 0.2rem;
+}
+
+    .loading-progress-text:after {
+        content: var(--blazor-load-percentage-text, "Loading");
+    }
+
+code {
+    color: #c02d76;
+}
+
+
+--- File: DeliveryRequestDTO.cs (Path: .\AutomationOfPurchases.Shared\DTOs\DeliveryRequestDTO.cs) ---
+
+﻿namespace AutomationOfPurchases.Shared.DTOs
+{
+    public class DeliveryRequestDTO
+    {
+        public int DeliveryRequestId { get; set; }
+
+        public int ItemId { get; set; }
+        public ItemDTO? Item { get; set; }
+
+        public int Quantity { get; set; }
+
+        public int OrderedById { get; set; }
+        public UserDTO? OrderedBy { get; set; }
+
+        public string Warehouse { get; set; } = string.Empty;
+
+        public int? RequestItemId { get; set; }
+        // Якщо потрібна інформація про RequestItem
+        // public RequestItemDTO? RequestItem { get; set; }
+    }
+}
+
+
+--- File: DepartmentDTO.cs (Path: .\AutomationOfPurchases.Shared\DTOs\DepartmentDTO.cs) ---
+
+﻿namespace AutomationOfPurchases.Shared.DTOs
+{
+    public class DepartmentDTO
+    {
+        public int DepartmentId { get; set; }
+        public string DepartmentName { get; set; } = string.Empty;
+
+        public int? HeadOfDepartmentId { get; set; }
+        public UserDTO? HeadOfDepartment { get; set; }
+
+        public int FreeCapital { get; set; }
+
+        // За потреби можна включити сюди список економістів
+        // public List<UserDTO> Economists { get; set; } = new();
+    }
+}
+
+
+--- File: GeneralNeedsListDTO.cs (Path: .\AutomationOfPurchases.Shared\DTOs\GeneralNeedsListDTO.cs) ---
+
+﻿namespace AutomationOfPurchases.Shared.DTOs
+{
+    public class GeneralNeedsListDTO
+    {
+        public int ListId { get; set; }
+        public DateTime CreationDate { get; set; }
+        public DateTime? NullificationDate { get; set; }
+
+        public List<RequestItemDTO> Items { get; set; } = new();
+    }
+}
+
+--- File: ItemDTO.cs (Path: .\AutomationOfPurchases.Shared\DTOs\ItemDTO.cs) ---
+
+﻿namespace AutomationOfPurchases.Shared.DTOs
+{
+    public class ItemDTO
+    {
+        public int ItemId { get; set; }
+        public string ItemName { get; set; } = string.Empty;
+        public string StorageUnit { get; set; } = string.Empty;
+    }
+}
+
+
+--- File: NetNeedsListDTO.cs (Path: .\AutomationOfPurchases.Shared\DTOs\NetNeedsListDTO.cs) ---
+
+﻿namespace AutomationOfPurchases.Shared.DTOs
+{
+    public class NetNeedsListDTO
+    {
+        public int ListId { get; set; }
+        public DateTime CreationDate { get; set; }
+        public DateTime? NullificationDate { get; set; }
+
+        public List<RequestItemDTO> Items { get; set; } = new();
+    }
+}
+
+--- File: RequestDTO.cs (Path: .\AutomationOfPurchases.Shared\DTOs\RequestDTO.cs) ---
+
+﻿using AutomationOfPurchases.Shared.Enums;
+
+namespace AutomationOfPurchases.Shared.DTOs
+{
+    public class RequestDTO
+    {
+        public int RequestId { get; set; }
+        public DateTime CreationDate { get; set; }
+        public RequestStatus Status { get; set; } = RequestStatus.Draft;
+
+        public int OrderedById { get; set; }
+        public UserDTO? OrderedBy { get; set; }
+
+        public bool ApprovedByDepartmentHead { get; set; }
+        public bool ApprovedByEconomist { get; set; }
+
+        public bool ReportDepartmentHead { get; set; }
+        public bool ReportRequester { get; set; }
+        public bool ReportEconomist { get; set; }
+
+        public List<RequestItemDTO> Items { get; set; } = new();
+    }
+}
+
+
+--- File: RequestItemDTO.cs (Path: .\AutomationOfPurchases.Shared\DTOs\RequestItemDTO.cs) ---
+
+﻿namespace AutomationOfPurchases.Shared.DTOs
+{
+    public class RequestItemDTO
+    {
+        public int RequestItemId { get; set; }
+
+        public int ItemId { get; set; }
+        public ItemDTO? Item { get; set; }
+
+        public int Quantity { get; set; }
+        public bool Satisfied { get; set; }
+
+        public int? OrderedById { get; set; }
+        public UserDTO? OrderedBy { get; set; }
+
+        // Повертаємо список DeliveryRequest
+        public List<DeliveryRequestDTO> DeliveryRequests { get; set; } = new();
+
+        // Якщо потрібно, щоб зчитувати ідентифікатор заявки, з якою зв’язано RequestItem
+        public int? RequestId { get; set; }
+    }
+}
+
+
+--- File: UserDTO.cs (Path: .\AutomationOfPurchases.Shared\DTOs\UserDTO.cs) ---
+
+﻿using AutomationOfPurchases.Shared.Enums;
+
+namespace AutomationOfPurchases.Shared.DTOs
+{
+    public class UserDTO
+    {
+        public string? UserId { get; set; }
+        public string FullName { get; set; } = string.Empty;
+
+        public int? DepartmentId { get; set; }
+        public DepartmentDTO? Department { get; set; }
+
+        public string Login { get; set; } = string.Empty;
+        public string Email { get; set; } = string.Empty;
+
+        public UserRole Role { get; set; } = UserRole.None;
+    }
+}
+
+
+--- File: RequestStatus.cs (Path: .\AutomationOfPurchases.Shared\Enums\RequestStatus.cs) ---
+
+﻿namespace AutomationOfPurchases.Shared.Enums
+{
+    public enum RequestStatus
+    {
+        Draft = 0,
+        PendingDepartmentHead = 1,
+        PendingEconomist = 2,
+        Approved = 3,
+        Rejected = 4
+        // За потреби доповнюйте статуси
+    }
+}
+
+
+--- File: UserRole.cs (Path: .\AutomationOfPurchases.Shared\Enums\UserRole.cs) ---
+
+﻿namespace AutomationOfPurchases.Shared.Enums
+{
+    public enum UserRole
+    {
+        None = 0,
+        DepartmentHead = 1,
+        Economist = 2,
+        WarehouseWorker = 3,
+        // За потреби можна додати інші
+    }
+}
+
+
+--- File: 20250223134410_InitialCreate.cs (Path: .\AutomationOfPurchases.Shared\Migrations\20250223134410_InitialCreate.cs) ---
+
+﻿using System;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+
+#nullable disable
+
+namespace AutomationOfPurchases.Shared.Migrations
+{
+    /// <inheritdoc />
+    public partial class InitialCreate : Migration
+    {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.CreateTable(
+                name: "AspNetRoles",
+                columns: table => new
+                {
+                    Id = table.Column<string>(type: "text", nullable: false),
+                    Name = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
+                    NormalizedName = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
+                    ConcurrencyStamp = table.Column<string>(type: "text", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_AspNetRoles", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "GeneralNeedsLists",
+                columns: table => new
+                {
+                    ListId = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    CreationDate = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    NullificationDate = table.Column<DateTime>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_GeneralNeedsLists", x => x.ListId);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "Items",
+                columns: table => new
+                {
+                    ItemId = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    ItemName = table.Column<string>(type: "text", nullable: false),
+                    StorageUnit = table.Column<string>(type: "text", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Items", x => x.ItemId);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "NetNeedsLists",
+                columns: table => new
+                {
+                    ListId = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    CreationDate = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    NullificationDate = table.Column<DateTime>(type: "timestamp with time zone", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_NetNeedsLists", x => x.ListId);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "AspNetRoleClaims",
+                columns: table => new
+                {
+                    Id = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    RoleId = table.Column<string>(type: "text", nullable: false),
+                    ClaimType = table.Column<string>(type: "text", nullable: true),
+                    ClaimValue = table.Column<string>(type: "text", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_AspNetRoleClaims", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_AspNetRoleClaims_AspNetRoles_RoleId",
+                        column: x => x.RoleId,
+                        principalTable: "AspNetRoles",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "AspNetUserClaims",
+                columns: table => new
+                {
+                    Id = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    UserId = table.Column<string>(type: "text", nullable: false),
+                    ClaimType = table.Column<string>(type: "text", nullable: true),
+                    ClaimValue = table.Column<string>(type: "text", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_AspNetUserClaims", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "AspNetUserLogins",
+                columns: table => new
+                {
+                    LoginProvider = table.Column<string>(type: "text", nullable: false),
+                    ProviderKey = table.Column<string>(type: "text", nullable: false),
+                    ProviderDisplayName = table.Column<string>(type: "text", nullable: true),
+                    UserId = table.Column<string>(type: "text", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_AspNetUserLogins", x => new { x.LoginProvider, x.ProviderKey });
+                });
+
+            migrationBuilder.CreateTable(
+                name: "AspNetUserRoles",
+                columns: table => new
+                {
+                    UserId = table.Column<string>(type: "text", nullable: false),
+                    RoleId = table.Column<string>(type: "text", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_AspNetUserRoles", x => new { x.UserId, x.RoleId });
+                    table.ForeignKey(
+                        name: "FK_AspNetUserRoles_AspNetRoles_RoleId",
+                        column: x => x.RoleId,
+                        principalTable: "AspNetRoles",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "AspNetUsers",
+                columns: table => new
+                {
+                    Id = table.Column<string>(type: "text", nullable: false),
+                    FullName = table.Column<string>(type: "text", nullable: false),
+                    DepartmentId = table.Column<int>(type: "integer", nullable: true),
+                    UserName = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
+                    NormalizedUserName = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
+                    Email = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
+                    NormalizedEmail = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true),
+                    EmailConfirmed = table.Column<bool>(type: "boolean", nullable: false),
+                    PasswordHash = table.Column<string>(type: "text", nullable: true),
+                    SecurityStamp = table.Column<string>(type: "text", nullable: true),
+                    ConcurrencyStamp = table.Column<string>(type: "text", nullable: true),
+                    PhoneNumber = table.Column<string>(type: "text", nullable: true),
+                    PhoneNumberConfirmed = table.Column<bool>(type: "boolean", nullable: false),
+                    TwoFactorEnabled = table.Column<bool>(type: "boolean", nullable: false),
+                    LockoutEnd = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true),
+                    LockoutEnabled = table.Column<bool>(type: "boolean", nullable: false),
+                    AccessFailedCount = table.Column<int>(type: "integer", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_AspNetUsers", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "AspNetUserTokens",
+                columns: table => new
+                {
+                    UserId = table.Column<string>(type: "text", nullable: false),
+                    LoginProvider = table.Column<string>(type: "text", nullable: false),
+                    Name = table.Column<string>(type: "text", nullable: false),
+                    Value = table.Column<string>(type: "text", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_AspNetUserTokens", x => new { x.UserId, x.LoginProvider, x.Name });
+                    table.ForeignKey(
+                        name: "FK_AspNetUserTokens_AspNetUsers_UserId",
+                        column: x => x.UserId,
+                        principalTable: "AspNetUsers",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "Departments",
+                columns: table => new
+                {
+                    DepartmentId = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    DepartmentName = table.Column<string>(type: "text", nullable: false),
+                    HeadOfDepartmentId = table.Column<string>(type: "text", nullable: true),
+                    FreeCapital = table.Column<int>(type: "integer", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Departments", x => x.DepartmentId);
+                    table.ForeignKey(
+                        name: "FK_Departments_AspNetUsers_HeadOfDepartmentId",
+                        column: x => x.HeadOfDepartmentId,
+                        principalTable: "AspNetUsers",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Restrict);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "Requests",
+                columns: table => new
+                {
+                    RequestId = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    CreationDate = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    Status = table.Column<string>(type: "text", nullable: false),
+                    OrderedById = table.Column<string>(type: "text", nullable: true),
+                    ApprovedByDepartmentHead = table.Column<bool>(type: "boolean", nullable: false),
+                    ApprovedByEconomist = table.Column<bool>(type: "boolean", nullable: false),
+                    ReportDepartmentHead = table.Column<bool>(type: "boolean", nullable: false),
+                    ReportRequester = table.Column<bool>(type: "boolean", nullable: false),
+                    ReportEconomist = table.Column<bool>(type: "boolean", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Requests", x => x.RequestId);
+                    table.ForeignKey(
+                        name: "FK_Requests_AspNetUsers_OrderedById",
+                        column: x => x.OrderedById,
+                        principalTable: "AspNetUsers",
+                        principalColumn: "Id");
+                });
+
+            migrationBuilder.CreateTable(
+                name: "RequestItems",
+                columns: table => new
+                {
+                    RequestItemId = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    ItemId = table.Column<int>(type: "integer", nullable: false),
+                    Quantity = table.Column<int>(type: "integer", nullable: false),
+                    Satisfied = table.Column<bool>(type: "boolean", nullable: false),
+                    OrderedById = table.Column<string>(type: "text", nullable: true),
+                    RequestId = table.Column<int>(type: "integer", nullable: true),
+                    GeneralNeedsListListId = table.Column<int>(type: "integer", nullable: true),
+                    NetNeedsListListId = table.Column<int>(type: "integer", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_RequestItems", x => x.RequestItemId);
+                    table.ForeignKey(
+                        name: "FK_RequestItems_AspNetUsers_OrderedById",
+                        column: x => x.OrderedById,
+                        principalTable: "AspNetUsers",
+                        principalColumn: "Id");
+                    table.ForeignKey(
+                        name: "FK_RequestItems_GeneralNeedsLists_GeneralNeedsListListId",
+                        column: x => x.GeneralNeedsListListId,
+                        principalTable: "GeneralNeedsLists",
+                        principalColumn: "ListId");
+                    table.ForeignKey(
+                        name: "FK_RequestItems_Items_ItemId",
+                        column: x => x.ItemId,
+                        principalTable: "Items",
+                        principalColumn: "ItemId",
+                        onDelete: ReferentialAction.Cascade);
+                    table.ForeignKey(
+                        name: "FK_RequestItems_NetNeedsLists_NetNeedsListListId",
+                        column: x => x.NetNeedsListListId,
+                        principalTable: "NetNeedsLists",
+                        principalColumn: "ListId");
+                    table.ForeignKey(
+                        name: "FK_RequestItems_Requests_RequestId",
+                        column: x => x.RequestId,
+                        principalTable: "Requests",
+                        principalColumn: "RequestId");
+                });
+
+            migrationBuilder.CreateTable(
+                name: "DeliveryRequests",
+                columns: table => new
+                {
+                    DeliveryRequestId = table.Column<int>(type: "integer", nullable: false)
+                        .Annotation("Npgsql:ValueGenerationStrategy", NpgsqlValueGenerationStrategy.IdentityByDefaultColumn),
+                    ItemId = table.Column<int>(type: "integer", nullable: false),
+                    Quantity = table.Column<int>(type: "integer", nullable: false),
+                    OrderedById = table.Column<string>(type: "text", nullable: true),
+                    Warehouse = table.Column<string>(type: "text", nullable: false),
+                    RequestItemId = table.Column<int>(type: "integer", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_DeliveryRequests", x => x.DeliveryRequestId);
+                    table.ForeignKey(
+                        name: "FK_DeliveryRequests_AspNetUsers_OrderedById",
+                        column: x => x.OrderedById,
+                        principalTable: "AspNetUsers",
+                        principalColumn: "Id");
+                    table.ForeignKey(
+                        name: "FK_DeliveryRequests_Items_ItemId",
+                        column: x => x.ItemId,
+                        principalTable: "Items",
+                        principalColumn: "ItemId",
+                        onDelete: ReferentialAction.Cascade);
+                    table.ForeignKey(
+                        name: "FK_DeliveryRequests_RequestItems_RequestItemId",
+                        column: x => x.RequestItemId,
+                        principalTable: "RequestItems",
+                        principalColumn: "RequestItemId");
+                });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_AspNetRoleClaims_RoleId",
+                table: "AspNetRoleClaims",
+                column: "RoleId");
+
+            migrationBuilder.CreateIndex(
+                name: "RoleNameIndex",
+                table: "AspNetRoles",
+                column: "NormalizedName",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_AspNetUserClaims_UserId",
+                table: "AspNetUserClaims",
+                column: "UserId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_AspNetUserLogins_UserId",
+                table: "AspNetUserLogins",
+                column: "UserId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_AspNetUserRoles_RoleId",
+                table: "AspNetUserRoles",
+                column: "RoleId");
+
+            migrationBuilder.CreateIndex(
+                name: "EmailIndex",
+                table: "AspNetUsers",
+                column: "NormalizedEmail");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_AspNetUsers_DepartmentId",
+                table: "AspNetUsers",
+                column: "DepartmentId");
+
+            migrationBuilder.CreateIndex(
+                name: "UserNameIndex",
+                table: "AspNetUsers",
+                column: "NormalizedUserName",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_DeliveryRequests_ItemId",
+                table: "DeliveryRequests",
+                column: "ItemId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_DeliveryRequests_OrderedById",
+                table: "DeliveryRequests",
+                column: "OrderedById");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_DeliveryRequests_RequestItemId",
+                table: "DeliveryRequests",
+                column: "RequestItemId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Departments_HeadOfDepartmentId",
+                table: "Departments",
+                column: "HeadOfDepartmentId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_RequestItems_GeneralNeedsListListId",
+                table: "RequestItems",
+                column: "GeneralNeedsListListId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_RequestItems_ItemId",
+                table: "RequestItems",
+                column: "ItemId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_RequestItems_NetNeedsListListId",
+                table: "RequestItems",
+                column: "NetNeedsListListId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_RequestItems_OrderedById",
+                table: "RequestItems",
+                column: "OrderedById");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_RequestItems_RequestId",
+                table: "RequestItems",
+                column: "RequestId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Requests_OrderedById",
+                table: "Requests",
+                column: "OrderedById");
+
+            migrationBuilder.AddForeignKey(
+                name: "FK_AspNetUserClaims_AspNetUsers_UserId",
+                table: "AspNetUserClaims",
+                column: "UserId",
+                principalTable: "AspNetUsers",
+                principalColumn: "Id",
+                onDelete: ReferentialAction.Cascade);
+
+            migrationBuilder.AddForeignKey(
+                name: "FK_AspNetUserLogins_AspNetUsers_UserId",
+                table: "AspNetUserLogins",
+                column: "UserId",
+                principalTable: "AspNetUsers",
+                principalColumn: "Id",
+                onDelete: ReferentialAction.Cascade);
+
+            migrationBuilder.AddForeignKey(
+                name: "FK_AspNetUserRoles_AspNetUsers_UserId",
+                table: "AspNetUserRoles",
+                column: "UserId",
+                principalTable: "AspNetUsers",
+                principalColumn: "Id",
+                onDelete: ReferentialAction.Cascade);
+
+            migrationBuilder.AddForeignKey(
+                name: "FK_AspNetUsers_Departments_DepartmentId",
+                table: "AspNetUsers",
+                column: "DepartmentId",
+                principalTable: "Departments",
+                principalColumn: "DepartmentId",
+                onDelete: ReferentialAction.SetNull);
+        }
+
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.DropForeignKey(
+                name: "FK_Departments_AspNetUsers_HeadOfDepartmentId",
+                table: "Departments");
+
+            migrationBuilder.DropTable(
+                name: "AspNetRoleClaims");
+
+            migrationBuilder.DropTable(
+                name: "AspNetUserClaims");
+
+            migrationBuilder.DropTable(
+                name: "AspNetUserLogins");
+
+            migrationBuilder.DropTable(
+                name: "AspNetUserRoles");
+
+            migrationBuilder.DropTable(
+                name: "AspNetUserTokens");
+
+            migrationBuilder.DropTable(
+                name: "DeliveryRequests");
+
+            migrationBuilder.DropTable(
+                name: "AspNetRoles");
+
+            migrationBuilder.DropTable(
+                name: "RequestItems");
+
+            migrationBuilder.DropTable(
+                name: "GeneralNeedsLists");
+
+            migrationBuilder.DropTable(
+                name: "Items");
+
+            migrationBuilder.DropTable(
+                name: "NetNeedsLists");
+
+            migrationBuilder.DropTable(
+                name: "Requests");
+
+            migrationBuilder.DropTable(
+                name: "AspNetUsers");
+
+            migrationBuilder.DropTable(
+                name: "Departments");
+        }
+    }
+}
+
+
+--- File: 20250223134410_InitialCreate.Designer.cs (Path: .\AutomationOfPurchases.Shared\Migrations\20250223134410_InitialCreate.Designer.cs) ---
+
+﻿// <auto-generated />
+using System;
+using AutomationOfPurchases.Shared.Models;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+
+#nullable disable
+
+namespace AutomationOfPurchases.Shared.Migrations
+{
+    [DbContext(typeof(AppDbContext))]
+    [Migration("20250223134410_InitialCreate")]
+    partial class InitialCreate
+    {
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
+        {
+#pragma warning disable 612, 618
+            modelBuilder
+                .HasAnnotation("ProductVersion", "8.0.13")
+                .HasAnnotation("Relational:MaxIdentifierLength", 63);
+
+            NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.AppUser", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<int>("AccessFailedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ConcurrencyStamp")
+                        .IsConcurrencyToken()
+                        .HasColumnType("text");
+
+                    b.Property<int?>("DepartmentId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Email")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("EmailConfirmed")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("FullName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("LockoutEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset?>("LockoutEnd")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("NormalizedEmail")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("NormalizedUserName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("PasswordHash")
+                        .HasColumnType("text");
+
+                    b.Property<string>("PhoneNumber")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("PhoneNumberConfirmed")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("SecurityStamp")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("TwoFactorEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("UserName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DepartmentId");
+
+                    b.HasIndex("NormalizedEmail")
+                        .HasDatabaseName("EmailIndex");
+
+                    b.HasIndex("NormalizedUserName")
+                        .IsUnique()
+                        .HasDatabaseName("UserNameIndex");
+
+                    b.ToTable("AspNetUsers", (string)null);
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.DeliveryRequest", b =>
+                {
+                    b.Property<int>("DeliveryRequestId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("DeliveryRequestId"));
+
+                    b.Property<int>("ItemId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("OrderedById")
+                        .HasColumnType("text");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("RequestItemId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Warehouse")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("DeliveryRequestId");
+
+                    b.HasIndex("ItemId");
+
+                    b.HasIndex("OrderedById");
+
+                    b.HasIndex("RequestItemId");
+
+                    b.ToTable("DeliveryRequests");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Department", b =>
+                {
+                    b.Property<int>("DepartmentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("DepartmentId"));
+
+                    b.Property<string>("DepartmentName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("FreeCapital")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("HeadOfDepartmentId")
+                        .HasColumnType("text");
+
+                    b.HasKey("DepartmentId");
+
+                    b.HasIndex("HeadOfDepartmentId");
+
+                    b.ToTable("Departments");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.GeneralNeedsList", b =>
+                {
+                    b.Property<int>("ListId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("ListId"));
+
+                    b.Property<DateTime>("CreationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("NullificationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("ListId");
+
+                    b.ToTable("GeneralNeedsLists");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Item", b =>
+                {
+                    b.Property<int>("ItemId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("ItemId"));
+
+                    b.Property<string>("ItemName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("StorageUnit")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("ItemId");
+
+                    b.ToTable("Items");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.NetNeedsList", b =>
+                {
+                    b.Property<int>("ListId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("ListId"));
+
+                    b.Property<DateTime>("CreationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("NullificationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("ListId");
+
+                    b.ToTable("NetNeedsLists");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Request", b =>
+                {
+                    b.Property<int>("RequestId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("RequestId"));
+
+                    b.Property<bool>("ApprovedByDepartmentHead")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("ApprovedByEconomist")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("CreationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("OrderedById")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("ReportDepartmentHead")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("ReportEconomist")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("ReportRequester")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("RequestId");
+
+                    b.HasIndex("OrderedById");
+
+                    b.ToTable("Requests");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.RequestItem", b =>
+                {
+                    b.Property<int>("RequestItemId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("RequestItemId"));
+
+                    b.Property<int?>("GeneralNeedsListListId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ItemId")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("NetNeedsListListId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("OrderedById")
+                        .HasColumnType("text");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("RequestId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("Satisfied")
+                        .HasColumnType("boolean");
+
+                    b.HasKey("RequestItemId");
+
+                    b.HasIndex("GeneralNeedsListListId");
+
+                    b.HasIndex("ItemId");
+
+                    b.HasIndex("NetNeedsListListId");
+
+                    b.HasIndex("OrderedById");
+
+                    b.HasIndex("RequestId");
+
+                    b.ToTable("RequestItems");
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ConcurrencyStamp")
+                        .IsConcurrencyToken()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("NormalizedName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NormalizedName")
+                        .IsUnique()
+                        .HasDatabaseName("RoleNameIndex");
+
+                    b.ToTable("AspNetRoles", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ClaimType")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ClaimValue")
+                        .HasColumnType("text");
+
+                    b.Property<string>("RoleId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RoleId");
+
+                    b.ToTable("AspNetRoleClaims", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<string>", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ClaimType")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ClaimValue")
+                        .HasColumnType("text");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("AspNetUserClaims", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserLogin<string>", b =>
+                {
+                    b.Property<string>("LoginProvider")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderKey")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderDisplayName")
+                        .HasColumnType("text");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("LoginProvider", "ProviderKey");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("AspNetUserLogins", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserRole<string>", b =>
+                {
+                    b.Property<string>("UserId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("RoleId")
+                        .HasColumnType("text");
+
+                    b.HasKey("UserId", "RoleId");
+
+                    b.HasIndex("RoleId");
+
+                    b.ToTable("AspNetUserRoles", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserToken<string>", b =>
+                {
+                    b.Property<string>("UserId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("LoginProvider")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Value")
+                        .HasColumnType("text");
+
+                    b.HasKey("UserId", "LoginProvider", "Name");
+
+                    b.ToTable("AspNetUserTokens", (string)null);
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.AppUser", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.Department", "Department")
+                        .WithMany("Economists")
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Department");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.DeliveryRequest", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.Item", "Item")
+                        .WithMany()
+                        .HasForeignKey("ItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", "OrderedBy")
+                        .WithMany()
+                        .HasForeignKey("OrderedById");
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.RequestItem", "RequestItem")
+                        .WithMany("DeliveryRequests")
+                        .HasForeignKey("RequestItemId");
+
+                    b.Navigation("Item");
+
+                    b.Navigation("OrderedBy");
+
+                    b.Navigation("RequestItem");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Department", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", "HeadOfDepartment")
+                        .WithMany()
+                        .HasForeignKey("HeadOfDepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("HeadOfDepartment");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Request", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", "OrderedBy")
+                        .WithMany()
+                        .HasForeignKey("OrderedById");
+
+                    b.Navigation("OrderedBy");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.RequestItem", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.GeneralNeedsList", null)
+                        .WithMany("Items")
+                        .HasForeignKey("GeneralNeedsListListId");
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.Item", "Item")
+                        .WithMany()
+                        .HasForeignKey("ItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.NetNeedsList", null)
+                        .WithMany("Items")
+                        .HasForeignKey("NetNeedsListListId");
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", "OrderedBy")
+                        .WithMany()
+                        .HasForeignKey("OrderedById");
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.Request", "Request")
+                        .WithMany("Items")
+                        .HasForeignKey("RequestId");
+
+                    b.Navigation("Item");
+
+                    b.Navigation("OrderedBy");
+
+                    b.Navigation("Request");
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
+                {
+                    b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole", null)
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<string>", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserLogin<string>", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserRole<string>", b =>
+                {
+                    b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole", null)
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserToken<string>", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Department", b =>
+                {
+                    b.Navigation("Economists");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.GeneralNeedsList", b =>
+                {
+                    b.Navigation("Items");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.NetNeedsList", b =>
+                {
+                    b.Navigation("Items");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Request", b =>
+                {
+                    b.Navigation("Items");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.RequestItem", b =>
+                {
+                    b.Navigation("DeliveryRequests");
+                });
+#pragma warning restore 612, 618
+        }
+    }
+}
+
+
+--- File: AppDbContextModelSnapshot.cs (Path: .\AutomationOfPurchases.Shared\Migrations\AppDbContextModelSnapshot.cs) ---
+
+﻿// <auto-generated />
+using System;
+using AutomationOfPurchases.Shared.Models;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
+
+#nullable disable
+
+namespace AutomationOfPurchases.Shared.Migrations
+{
+    [DbContext(typeof(AppDbContext))]
+    partial class AppDbContextModelSnapshot : ModelSnapshot
+    {
+        protected override void BuildModel(ModelBuilder modelBuilder)
+        {
+#pragma warning disable 612, 618
+            modelBuilder
+                .HasAnnotation("ProductVersion", "8.0.13")
+                .HasAnnotation("Relational:MaxIdentifierLength", 63);
+
+            NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.AppUser", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<int>("AccessFailedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ConcurrencyStamp")
+                        .IsConcurrencyToken()
+                        .HasColumnType("text");
+
+                    b.Property<int?>("DepartmentId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Email")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("EmailConfirmed")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("FullName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("LockoutEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset?>("LockoutEnd")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("NormalizedEmail")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("NormalizedUserName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("PasswordHash")
+                        .HasColumnType("text");
+
+                    b.Property<string>("PhoneNumber")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("PhoneNumberConfirmed")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("SecurityStamp")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("TwoFactorEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("UserName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DepartmentId");
+
+                    b.HasIndex("NormalizedEmail")
+                        .HasDatabaseName("EmailIndex");
+
+                    b.HasIndex("NormalizedUserName")
+                        .IsUnique()
+                        .HasDatabaseName("UserNameIndex");
+
+                    b.ToTable("AspNetUsers", (string)null);
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.DeliveryRequest", b =>
+                {
+                    b.Property<int>("DeliveryRequestId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("DeliveryRequestId"));
+
+                    b.Property<int>("ItemId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("OrderedById")
+                        .HasColumnType("text");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("RequestItemId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Warehouse")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("DeliveryRequestId");
+
+                    b.HasIndex("ItemId");
+
+                    b.HasIndex("OrderedById");
+
+                    b.HasIndex("RequestItemId");
+
+                    b.ToTable("DeliveryRequests");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Department", b =>
+                {
+                    b.Property<int>("DepartmentId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("DepartmentId"));
+
+                    b.Property<string>("DepartmentName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("FreeCapital")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("HeadOfDepartmentId")
+                        .HasColumnType("text");
+
+                    b.HasKey("DepartmentId");
+
+                    b.HasIndex("HeadOfDepartmentId");
+
+                    b.ToTable("Departments");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.GeneralNeedsList", b =>
+                {
+                    b.Property<int>("ListId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("ListId"));
+
+                    b.Property<DateTime>("CreationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("NullificationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("ListId");
+
+                    b.ToTable("GeneralNeedsLists");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Item", b =>
+                {
+                    b.Property<int>("ItemId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("ItemId"));
+
+                    b.Property<string>("ItemName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("StorageUnit")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("ItemId");
+
+                    b.ToTable("Items");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.NetNeedsList", b =>
+                {
+                    b.Property<int>("ListId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("ListId"));
+
+                    b.Property<DateTime>("CreationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("NullificationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("ListId");
+
+                    b.ToTable("NetNeedsLists");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Request", b =>
+                {
+                    b.Property<int>("RequestId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("RequestId"));
+
+                    b.Property<bool>("ApprovedByDepartmentHead")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("ApprovedByEconomist")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("CreationDate")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("OrderedById")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("ReportDepartmentHead")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("ReportEconomist")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("ReportRequester")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("RequestId");
+
+                    b.HasIndex("OrderedById");
+
+                    b.ToTable("Requests");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.RequestItem", b =>
+                {
+                    b.Property<int>("RequestItemId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("RequestItemId"));
+
+                    b.Property<int?>("GeneralNeedsListListId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("ItemId")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("NetNeedsListListId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("OrderedById")
+                        .HasColumnType("text");
+
+                    b.Property<int>("Quantity")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("RequestId")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("Satisfied")
+                        .HasColumnType("boolean");
+
+                    b.HasKey("RequestItemId");
+
+                    b.HasIndex("GeneralNeedsListListId");
+
+                    b.HasIndex("ItemId");
+
+                    b.HasIndex("NetNeedsListListId");
+
+                    b.HasIndex("OrderedById");
+
+                    b.HasIndex("RequestId");
+
+                    b.ToTable("RequestItems");
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ConcurrencyStamp")
+                        .IsConcurrencyToken()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("NormalizedName")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NormalizedName")
+                        .IsUnique()
+                        .HasDatabaseName("RoleNameIndex");
+
+                    b.ToTable("AspNetRoles", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ClaimType")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ClaimValue")
+                        .HasColumnType("text");
+
+                    b.Property<string>("RoleId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RoleId");
+
+                    b.ToTable("AspNetRoleClaims", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<string>", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ClaimType")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ClaimValue")
+                        .HasColumnType("text");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("AspNetUserClaims", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserLogin<string>", b =>
+                {
+                    b.Property<string>("LoginProvider")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderKey")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ProviderDisplayName")
+                        .HasColumnType("text");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("LoginProvider", "ProviderKey");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("AspNetUserLogins", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserRole<string>", b =>
+                {
+                    b.Property<string>("UserId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("RoleId")
+                        .HasColumnType("text");
+
+                    b.HasKey("UserId", "RoleId");
+
+                    b.HasIndex("RoleId");
+
+                    b.ToTable("AspNetUserRoles", (string)null);
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserToken<string>", b =>
+                {
+                    b.Property<string>("UserId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("LoginProvider")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Name")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Value")
+                        .HasColumnType("text");
+
+                    b.HasKey("UserId", "LoginProvider", "Name");
+
+                    b.ToTable("AspNetUserTokens", (string)null);
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.AppUser", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.Department", "Department")
+                        .WithMany("Economists")
+                        .HasForeignKey("DepartmentId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Department");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.DeliveryRequest", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.Item", "Item")
+                        .WithMany()
+                        .HasForeignKey("ItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", "OrderedBy")
+                        .WithMany()
+                        .HasForeignKey("OrderedById");
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.RequestItem", "RequestItem")
+                        .WithMany("DeliveryRequests")
+                        .HasForeignKey("RequestItemId");
+
+                    b.Navigation("Item");
+
+                    b.Navigation("OrderedBy");
+
+                    b.Navigation("RequestItem");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Department", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", "HeadOfDepartment")
+                        .WithMany()
+                        .HasForeignKey("HeadOfDepartmentId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("HeadOfDepartment");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Request", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", "OrderedBy")
+                        .WithMany()
+                        .HasForeignKey("OrderedById");
+
+                    b.Navigation("OrderedBy");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.RequestItem", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.GeneralNeedsList", null)
+                        .WithMany("Items")
+                        .HasForeignKey("GeneralNeedsListListId");
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.Item", "Item")
+                        .WithMany()
+                        .HasForeignKey("ItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.NetNeedsList", null)
+                        .WithMany("Items")
+                        .HasForeignKey("NetNeedsListListId");
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", "OrderedBy")
+                        .WithMany()
+                        .HasForeignKey("OrderedById");
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.Request", "Request")
+                        .WithMany("Items")
+                        .HasForeignKey("RequestId");
+
+                    b.Navigation("Item");
+
+                    b.Navigation("OrderedBy");
+
+                    b.Navigation("Request");
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
+                {
+                    b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole", null)
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserClaim<string>", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserLogin<string>", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserRole<string>", b =>
+                {
+                    b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole", null)
+                        .WithMany()
+                        .HasForeignKey("RoleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityUserToken<string>", b =>
+                {
+                    b.HasOne("AutomationOfPurchases.Shared.Models.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Department", b =>
+                {
+                    b.Navigation("Economists");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.GeneralNeedsList", b =>
+                {
+                    b.Navigation("Items");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.NetNeedsList", b =>
+                {
+                    b.Navigation("Items");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.Request", b =>
+                {
+                    b.Navigation("Items");
+                });
+
+            modelBuilder.Entity("AutomationOfPurchases.Shared.Models.RequestItem", b =>
+                {
+                    b.Navigation("DeliveryRequests");
+                });
+#pragma warning restore 612, 618
+        }
+    }
+}
+
+
+--- File: AppDbContext.cs (Path: .\AutomationOfPurchases.Shared\Models\AppDbContext.cs) ---
+
+﻿using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+
+namespace AutomationOfPurchases.Shared.Models
+{
+    // Замість простого DbContext робимо:
+    //   IdentityDbContext<AppUser>  (або <AppUser, IdentityRole, string>)
+    public class AppDbContext : IdentityDbContext<AppUser>
+    {
+        public AppDbContext(DbContextOptions<AppDbContext> options)
+            : base(options)
+        {
+        }
+
+        // Ваші решта сутностей
+        public DbSet<Department> Departments { get; set; } = null!;
+        public DbSet<Request> Requests { get; set; } = null!;
+        public DbSet<RequestItem> RequestItems { get; set; } = null!;
+        public DbSet<Item> Items { get; set; } = null!;
+        public DbSet<DeliveryRequest> DeliveryRequests { get; set; } = null!;
+        public DbSet<GeneralNeedsList> GeneralNeedsLists { get; set; } = null!;
+        public DbSet<NetNeedsList> NetNeedsLists { get; set; } = null!;
+
+        protected override void OnModelCreating(ModelBuilder builder)
+        {
+            base.OnModelCreating(builder);
+
+            // Якщо у вас є зв’язки Department -> HeadOfDepartment
+            // або Department -> Economists, налаштуйте їх тут:
+            // (приклад)
+            builder.Entity<Department>()
+                .HasOne(d => d.HeadOfDepartment)
+                .WithMany()
+                .HasForeignKey(d => d.HeadOfDepartmentId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            builder.Entity<Department>()
+                .HasMany(d => d.Economists)
+                .WithOne(u => u.Department)
+                .HasForeignKey(u => u.DepartmentId)
+                .OnDelete(DeleteBehavior.SetNull);
+        }
+    }
+}
+
+
+--- File: AppUser.cs (Path: .\AutomationOfPurchases.Shared\Models\AppUser.cs) ---
+
+﻿using Microsoft.AspNetCore.Identity;
+
+namespace AutomationOfPurchases.Shared.Models
+{
+    // IdentityUser<string> за замовчуванням має ключ типу string (GUID).
+    // Можна зробити <int> якщо треба.
+    public class AppUser : IdentityUser
+    {
+        // Приклад додаткових полів, що були у Вашому "User"
+        public string FullName { get; set; } = string.Empty;
+
+        // За потреби – зв’язок із Department
+        public int? DepartmentId { get; set; }
+        public virtual Department? Department { get; set; }
+
+        // Додайте інші поля, якщо бажаєте
+        // Напр., ApprovedByEconomist, WarehouseId тощо
+    }
+}
+
+
+--- File: DeliveryRequest.cs (Path: .\AutomationOfPurchases.Shared\Models\DeliveryRequest.cs) ---
+
+﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace AutomationOfPurchases.Shared.Models
+{
+    public class DeliveryRequest
+    {
+        [Key]
+        public int DeliveryRequestId { get; set; }
+
+        // Який Item доставляти
+        public int ItemId { get; set; }
+        [ForeignKey(nameof(ItemId))]
+        public virtual Item? Item { get; set; }
+
+        public int Quantity { get; set; }
+
+        // Хто ініціював доставку
+        // Раніше було int OrderedById, тепер string? 
+        public string? OrderedById { get; set; }
+        [ForeignKey(nameof(OrderedById))]
+        public virtual AppUser? OrderedBy { get; set; }
+
+        public string Warehouse { get; set; } = string.Empty;
+
+        // Зв'язок назад до RequestItem (якщо хочемо)
+        public int? RequestItemId { get; set; }
+        [ForeignKey(nameof(RequestItemId))]
+        public virtual RequestItem? RequestItem { get; set; }
+    }
+}
+
+
+--- File: Department.cs (Path: .\AutomationOfPurchases.Shared\Models\Department.cs) ---
+
+﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace AutomationOfPurchases.Shared.Models
+{
+    public class Department
+    {
+        [Key]
+        public int DepartmentId { get; set; }
+        public string DepartmentName { get; set; } = string.Empty;
+
+        // Керівник відділу. 
+        // Було int? HeadOfDepartmentId, але AppUser.Id -> string
+        public string? HeadOfDepartmentId { get; set; }
+
+        [ForeignKey(nameof(HeadOfDepartmentId))]
+        public virtual AppUser? HeadOfDepartment { get; set; }
+
+        // Список економістів (посилаються на DepartmentId в AppUser)
+        public virtual ICollection<AppUser> Economists { get; set; }
+            = new List<AppUser>();
+
+        public int FreeCapital { get; set; }
+    }
+}
+
+
+--- File: GeneralNeedsList.cs (Path: .\AutomationOfPurchases.Shared\Models\GeneralNeedsList.cs) ---
+
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace AutomationOfPurchases.Shared.Models
+{
+    public class GeneralNeedsList
+    {
+        [Key]
+        public int ListId { get; set; }
+
+        public DateTime CreationDate { get; set; }
+        public DateTime? NullificationDate { get; set; }
+
+        // Припустимо, що маємо список RequestItem, який пов'язуємо через проміжну таблицю
+        // або ключ із RequestItem. Тут показано підхід "один-до-багатьох" для прикладу:
+        public virtual ICollection<RequestItem> Items { get; set; }
+            = new List<RequestItem>();
+    }
+}
+
+
+--- File: Item.cs (Path: .\AutomationOfPurchases.Shared\Models\Item.cs) ---
+
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace AutomationOfPurchases.Shared.Models
+{
+    public class Item
+    {
+        [Key]
+        public int ItemId { get; set; }
+
+        public string ItemName { get; set; } = string.Empty;
+
+        public string StorageUnit { get; set; } = string.Empty;
+    }
+}
+
+
+--- File: NetNeedsList.cs (Path: .\AutomationOfPurchases.Shared\Models\NetNeedsList.cs) ---
+
+﻿using System.ComponentModel.DataAnnotations;
+
+namespace AutomationOfPurchases.Shared.Models
+{
+    public class NetNeedsList
+    {
+        [Key]
+        public int ListId { get; set; }
+
+        public DateTime CreationDate { get; set; }
+        public DateTime? NullificationDate { get; set; }
+
+        public virtual ICollection<RequestItem> Items { get; set; }
+            = new List<RequestItem>();
+    }
+}
+
+
+--- File: Request.cs (Path: .\AutomationOfPurchases.Shared\Models\Request.cs) ---
+
+﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace AutomationOfPurchases.Shared.Models
+{
+    public class Request
+    {
+        [Key]
+        public int RequestId { get; set; }
+
+        public DateTime CreationDate { get; set; }
+
+        public string Status { get; set; } = string.Empty;
+
+        // Хто створив заявку
+        // Раніше: int OrderedById
+        public string? OrderedById { get; set; }
+        [ForeignKey(nameof(OrderedById))]
+        public virtual AppUser? OrderedBy { get; set; }
+
+        // Відмітки про затвердження
+        public bool ApprovedByDepartmentHead { get; set; }
+        public bool ApprovedByEconomist { get; set; }
+
+        // Чи надсилалися повідомлення
+        public bool ReportDepartmentHead { get; set; }
+        public bool ReportRequester { get; set; }
+        public bool ReportEconomist { get; set; }
+
+        // Список замовлених ТМЦ (композиція: RequestItem'и належать цій заявці)
+        public virtual ICollection<RequestItem> Items { get; set; }
+            = new List<RequestItem>();
+    }
+}
+
+
+--- File: RequestItem.cs (Path: .\AutomationOfPurchases.Shared\Models\RequestItem.cs) ---
+
+﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace AutomationOfPurchases.Shared.Models
+{
+    public class RequestItem
+    {
+        [Key]
+        public int RequestItemId { get; set; }
+
+        // Навігаційна властивість до товару з каталогу
+        public int ItemId { get; set; }
+        [ForeignKey(nameof(ItemId))]
+        public virtual Item? Item { get; set; }
+
+        public int Quantity { get; set; }
+        public bool Satisfied { get; set; }
+
+        // Хто замовив цей Item
+        // Раніше: int? OrderedById
+        public string? OrderedById { get; set; }
+        [ForeignKey(nameof(OrderedById))]
+        public virtual AppUser? OrderedBy { get; set; }
+
+        // Для кожного RequestItem можна створити декілька DeliveryRequest
+        public virtual ICollection<DeliveryRequest> DeliveryRequests { get; set; }
+            = new List<DeliveryRequest>();
+
+        // Якщо потрібний прямий зв’язок із Request (один-до-багатьох)
+        public int? RequestId { get; set; }
+        [ForeignKey(nameof(RequestId))]
+        public virtual Request? Request { get; set; }
+    }
+}
+
+

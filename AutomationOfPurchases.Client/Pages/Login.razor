@@ -1,0 +1,97 @@
+﻿@page "/login"
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Authorization
+@attribute [AllowAnonymous]
+
+@inject HttpClient Http
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+@inject AuthenticationStateProvider AuthStateProvider
+
+@using System.Net.Http.Json
+
+<h3>Login</h3>
+
+<div class="container my-4">
+    <div class="row">
+        <div class="col-md-5">
+            <EditForm Model="@credentials" OnValidSubmit="@HandleValidSubmit" class="p-3 border rounded">
+                <div class="mb-3">
+                    <label class="form-label">User Name</label>
+                    <InputText class="form-control" @bind-Value="@credentials.UserName" />
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">Password</label>
+                    <InputText class="form-control" @bind-Value="@credentials.Password" type="password" />
+                </div>
+
+                <ValidationSummary />
+
+                <button type="submit" class="btn btn-primary">Log In</button>
+
+                @if (!string.IsNullOrEmpty(errorMessage))
+                {
+                    <div class="alert alert-danger mt-3">@errorMessage</div>
+                }
+            </EditForm>
+        </div>
+    </div>
+</div>
+
+@code {
+    private LoginRequest credentials = new();
+    private string? errorMessage;
+
+    private async Task HandleValidSubmit()
+    {
+        errorMessage = null;
+
+        try
+        {
+            // Відправляємо логін-запит на API (припустимо: POST /api/auth/login)
+            var response = await Http.PostAsJsonAsync("api/auth/login", credentials);
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<LoginResponse>();
+                if (result is not null && !string.IsNullOrWhiteSpace(result.Token))
+                {
+                    // Зберігаємо токен у localStorage
+                    await JSRuntime.InvokeVoidAsync("localStorage.setItem", "authToken", result.Token);
+
+                    // Повідомляємо провайдера, що користувач тепер авторизований
+                    if (AuthStateProvider is Client.Auth.CustomAuthStateProvider customProvider)
+                    {
+                        customProvider.NotifyUserAuthenticationStateChanged();
+                    }
+
+                    // Перенаправляємося на головну
+                    Navigation.NavigateTo("/", true);
+                }
+                else
+                {
+                    errorMessage = "No token returned from server.";
+                }
+            }
+            else
+            {
+                errorMessage = "Invalid credentials.";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+        }
+    }
+
+    class LoginRequest
+    {
+        public string UserName { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+    }
+
+    class LoginResponse
+    {
+        public string Token { get; set; } = string.Empty;
+    }
+}
