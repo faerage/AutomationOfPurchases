@@ -1,0 +1,155 @@
+﻿@page "/delivery-requests"
+@attribute [Authorize(Roles = "WarehouseWorker")]
+@inject HttpClient Http
+@inject IJSRuntime JSRuntime
+
+@using AutomationOfPurchases.Shared.DTOs
+
+<h3>Заявки на доставку</h3>
+
+<!-- Кнопка для розгортання/згортання панелі фільтру -->
+<button class="btn btn-secondary mb-3" @onclick="ToggleFilter">
+    @(showFilter ? "Сховати фільтр" : "Фільтрація")
+</button>
+
+@if (showFilter)
+{
+    <div class="border p-3 mb-3">
+        <div class="row g-3">
+            <div class="col-md-3">
+                <label class="form-label">ТМЦ</label>
+                <input class="form-control"
+                       @bind="filterTmc"
+                       @bind:event="oninput"
+                       placeholder="Назва товару..." />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Склад</label>
+                <input class="form-control"
+                       @bind="filterWarehouse"
+                       @bind:event="oninput"
+                       placeholder="Назва складу..." />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Замовник</label>
+                <input class="form-control"
+                       @bind="filterUser"
+                       @bind:event="oninput"
+                       placeholder="ПІБ замовника..." />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Відділ</label>
+                <input class="form-control"
+                       @bind="filterDept"
+                       @bind:event="oninput"
+                       placeholder="Назва відділу..." />
+            </div>
+        </div>
+
+        <!-- Кнопка застосування фільтру -->
+        <button class="btn btn-primary mt-3" @onclick="ApplyFilter">
+            Застосувати
+        </button>
+    </div>
+}
+
+@if (requests == null)
+{
+    <p>Завантаження...</p>
+}
+else if (!requests.Any())
+{
+    <p>Немає заявок на доставку.</p>
+}
+else
+{
+    <table class="table table-hover table-striped table-bordered table-sm align-middle">
+        <thead>
+            <tr class="table-light">
+                <th>ТМЦ</th>
+                <th style="width:120px;">Кількість</th>
+                <th style="width:150px;">Склад</th>
+                <th style="width:180px;">Замовник</th>
+                <th style="width:180px;">Відділ</th>
+                <th style="width:220px;">Пошта</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var d in filteredRequests)
+            {
+                <tr>
+                    <td>@d.ItemName</td>
+                    <td>@d.Quantity</td>
+                    <td>@d.Warehouse</td>
+                    <td>@d.OrderedByFullName</td>
+                    <td>@d.OrderedByDepartmentName</td>
+                    <td>@d.OrderedByEmail</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private List<DeliveryRequestDTO>? requests;
+    private List<DeliveryRequestDTO> filteredRequests = new();
+
+    // Панель фільтру
+    private bool showFilter = false;
+
+    // Поля для фільтра
+    private string filterTmc = "";
+    private string filterWarehouse = "";
+    private string filterUser = "";
+    private string filterDept = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Викликаємо GET /api/deliveryrequests
+        requests = await Http.GetFromJsonAsync<List<DeliveryRequestDTO>>("api/deliveryrequests");
+        filteredRequests = requests ?? new List<DeliveryRequestDTO>();
+    }
+
+    private void ToggleFilter()
+    {
+        showFilter = !showFilter;
+    }
+
+    private void ApplyFilter()
+    {
+        if (requests == null) return;
+
+        // Початкова колекція
+        var query = requests.AsEnumerable();
+
+        // 1) Фільтр ТМЦ
+        if (!string.IsNullOrWhiteSpace(filterTmc))
+        {
+            var lowerTmc = filterTmc.ToLower();
+            query = query.Where(d => d.ItemName.ToLower().Contains(lowerTmc));
+        }
+
+        // 2) Фільтр Склад
+        if (!string.IsNullOrWhiteSpace(filterWarehouse))
+        {
+            var lowerWh = filterWarehouse.ToLower();
+            query = query.Where(d => d.Warehouse.ToLower().Contains(lowerWh));
+        }
+
+        // 3) Фільтр Замовник
+        if (!string.IsNullOrWhiteSpace(filterUser))
+        {
+            var lowerUser = filterUser.ToLower();
+            query = query.Where(d => d.OrderedByFullName.ToLower().Contains(lowerUser));
+        }
+
+        // 4) Фільтр Відділ
+        if (!string.IsNullOrWhiteSpace(filterDept))
+        {
+            var lowerDept = filterDept.ToLower();
+            query = query.Where(d => d.OrderedByDepartmentName.ToLower().Contains(lowerDept));
+        }
+
+        filteredRequests = query.ToList();
+    }
+}

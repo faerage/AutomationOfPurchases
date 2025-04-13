@@ -44,8 +44,9 @@ if __name__ == "__main__":
         ".ts", ".yml", ".yaml", ".sh", ".ps1", ".md", ".conf", ""
     ]
 
+    # Додаємо "Migrations" до списку папок, які ігноруються
     exclude_dirs = [
-        "bin", "obj", "wwwroot/_framework", "scopedcss", "node_modules", ".vs", ".git",  
+        "bin", "obj", "wwwroot/_framework", "scopedcss", "node_modules", ".vs", ".git", "Migrations"
     ]
 
     exclude_files = [
@@ -59,7 +60,10 @@ if __name__ == "__main__":
 
     exclude_patterns = [
         ".min.css",  # Виключає всі мінімізовані CSS файли (крім app.css)
-        ".min.js", ".txt", ".dockerignore", ".gitattributes", ".gitignore", ".sln", ".user", ".csproj", ".map", ".py"    # Виключає всі мінімізовані JS файли
+        ".min.js", ".txt", ".dockerignore", ".gitattributes", ".gitignore", ".sln", ".user", ".csproj", ".map", ".py"
     ]
 
     gather_files(".", needed_extensions, exclude_dirs, exclude_files, exclude_patterns)
+
+    # Затримка перед закриттям консолі (за потреби)
+    input("Натисніть Enter, щоб вийти...")

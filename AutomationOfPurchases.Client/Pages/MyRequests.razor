@@ -1,60 +1,191 @@
 ﻿@page "/my-requests"
+@attribute [Authorize]
+@inject HttpClient Http
+@inject IJSRuntime JSRuntime
+@inject NavigationManager Navigation
+
+@using AutomationOfPurchases.Shared.DTOs
+@using AutomationOfPurchases.Shared.Enums
+@using AutomationOfPurchases.Shared.Localization
 
 <h3>Мої заявки</h3>
+
+<div class="mb-3">
+    <label class="form-label">Пошук за назвою заявки:</label>
+    <input type="text" class="form-control" @bind="searchTitle"
+           placeholder="Введіть фрагмент назви" />
+</div>
+
+<div class="mb-3">
+    <label class="form-label">Фільтр за статусом:</label>
+    <select class="form-select" @bind="selectedStatusString">
+        <option value="">Всі статуси</option>
+        @foreach (var st in allStatuses)
+        {
+            <option value="@st.ToString()">@RequestStatusLocalizer.Localize(st)</option>
+        }
+    </select>
+</div>
 
 @if (requests == null)
 {
     <p>Завантаження...</p>
 }
-else if (!requests.Any())
-{
-    <p>У вас поки що немає створених заявок.</p>
-}
 else
 {
-    <table class="table table-striped">
-        <thead>
-            <tr>
-                <th>Назва</th>
-                <th>Опис</th>
-                <th>Статус</th>
-                <th>Дата створення</th>
-            </tr>
-        </thead>
-        <tbody>
-            @foreach (var r in requests)
-            {
+    var filtered = GetFilteredRequests();
+    if (!filtered.Any())
+    {
+        <p>Немає заявок для відображення</p>
+    }
+    else
+    {
+        <table class="table table-hover">
+            <thead>
                 <tr>
-                    <td>@r.Title</td>
-                    <td>@r.Description</td>
-                    <td>@r.Status</td>
-                    <td>@r.CreationDate</td>
+                    <th>Назва заявки</th>
+                    <th>Статус заявки</th>
+                    <th>Дата створення</th>
+                    <th></th>
                 </tr>
-            }
-        </tbody>
-    </table>
+            </thead>
+            <tbody>
+                @foreach (var r in filtered)
+                {
+                    <tr>
+                        <td>@r.Title</td>
+                        <td>@RequestStatusLocalizer.Localize(r.Status)</td>
+                        <td>@r.CreationDate.ToLocalTime()</td>
+                        <td>
+                            @if (r.Status == RequestStatus.Draft)
+                            {
+                                <!-- Кнопка "Завершити створення" -->
+                                <button class="btn btn-primary btn-sm me-2"
+                                        @onclick="() => ContinueCreating(r.RequestId)">
+                                    Завершити створення
+                                </button>
+
+                                <!-- Кнопка "Видалити чернетку" -->
+                                <button class="btn btn-danger btn-sm"
+                                        @onclick="() => DeleteDraft(r.RequestId)">
+                                    Видалити чернетку
+                                </button>
+                            }
+                            else
+                            {
+                                <!-- Якщо не Draft, то показуємо "Переглянути" -->
+                                <button class="btn btn-primary btn-sm"
+                                        @onclick="() => ViewRequest(r.RequestId)">
+                                    Переглянути
+                                </button>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+}
+
+@if (!string.IsNullOrEmpty(message))
+{
+    <div class="alert alert-info mt-3">@message</div>
 }
 
 @code {
-    private List<RequestModel>? requests;
+    private List<RequestDTO>? requests;
+    private string? message;
+
+    // Поле для пошуку за назвою
+    private string? searchTitle;
+
+    // Випадаючий список доступних статусів (у вигляді Enums)
+    private List<RequestStatus> allStatuses = new()
+    {
+        RequestStatus.Draft,
+        RequestStatus.PendingDepartmentHead,
+        RequestStatus.PendingEconomist,
+        RequestStatus.Approved,
+        RequestStatus.Rejected
+    };
+
+    // Який статус обрано зараз у селекті
+    private string? selectedStatusString = "";
 
     protected override async Task OnInitializedAsync()
     {
-        // Завантажити з API:
-        // requests = await Http.GetFromJsonAsync<List<RequestModel>>("api/requests/my");
-        // Поки що заглушка:
-        requests = new List<RequestModel>
-        {
-            new RequestModel { Title = "Закупка канцтоварів", Description = "Потрібні олівці", Status="Очікує затвердження", CreationDate=DateTime.Now.AddDays(-1) },
-            new RequestModel { Title = "Закупка паперу", Description = "5000 аркушів А4", Status="Затверджено", CreationDate=DateTime.Now.AddDays(-2) }
-        };
+        await LoadRequestsAsync();
     }
 
-    class RequestModel
+    private async Task LoadRequestsAsync()
     {
-        public string Title { get; set; } = string.Empty;
-        public string Description { get; set; } = string.Empty;
-        public string Status { get; set; } = "Новий";
-        public DateTime CreationDate { get; set; }
+        message = null;
+        try
+        {
+            // Завантаження списку заявок (всіх, які належать поточному юзеру)
+            requests = await Http.GetFromJsonAsync<List<RequestDTO>>("api/request/my");
+        }
+        catch (Exception ex)
+        {
+            message = $"Помилка завантаження: {ex.Message}";
+        }
+    }
+
+    // Метод для відкриття деталів заявки
+    private void ViewRequest(int requestId)
+    {
+        Navigation.NavigateTo($"/request-details/{requestId}");
+    }
+
+    // Метод "Завершити створення" – знову відкриваємо форму create-request з query-параметром
+    private void ContinueCreating(int draftId)
+    {
+        Navigation.NavigateTo($"/create-request?draftId={draftId}");
+    }
+
+    // Видалення чернетки
+    private async Task DeleteDraft(int requestId)
+    {
+        bool confirm = await JSRuntime.InvokeAsync<bool>("confirm",
+            new object?[] { "Ви впевнені, що хочете видалити цю чернетку?" });
+        if (!confirm) return;
+
+        var response = await Http.DeleteAsync($"api/request/draft/{requestId}");
+        if (response.IsSuccessStatusCode)
+        {
+            requests?.RemoveAll(r => r.RequestId == requestId);
+        }
+        else
+        {
+            var err = await response.Content.ReadAsStringAsync();
+            message = $"Помилка видалення: {err}";
+        }
+    }
+
+    // Фільтрація списку заявок
+    private IEnumerable<RequestDTO> GetFilteredRequests()
+    {
+        if (requests == null)
+            return Enumerable.Empty<RequestDTO>();
+
+        var query = requests.AsEnumerable();
+
+        // 1) Пошук за назвою
+        if (!string.IsNullOrWhiteSpace(searchTitle))
+        {
+            var lowerSearch = searchTitle.ToLower();
+            query = query.Where(r => (r.Title ?? "").ToLower().Contains(lowerSearch));
+        }
+
+        // 2) Фільтр за статусом
+        if (!string.IsNullOrEmpty(selectedStatusString))
+        {
+            if (Enum.TryParse<RequestStatus>(selectedStatusString, out var parsedStatus))
+            {
+                query = query.Where(r => r.Status == parsedStatus);
+            }
+        }
+
+        return query;
     }
 }

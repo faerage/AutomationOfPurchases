@@ -5,7 +5,8 @@
         public int DepartmentId { get; set; }
         public string DepartmentName { get; set; } = string.Empty;
 
-        public int? HeadOfDepartmentId { get; set; }
+        // Змінили тип з int? на string?
+        public string? HeadOfDepartmentId { get; set; }
         public UserDTO? HeadOfDepartment { get; set; }
 
         public int FreeCapital { get; set; }

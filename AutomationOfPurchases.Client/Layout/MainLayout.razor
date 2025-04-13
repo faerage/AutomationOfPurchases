@@ -1,39 +1,143 @@
 ﻿@inherits LayoutComponentBase
+@using Microsoft.AspNetCore.Components.Authorization
 
 <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-    <a class="navbar-brand ms-3" href="/">AutomationOfPurchases</a>
+    <a class="navbar-brand ms-3" href="/">Планування закупівель</a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse"
             data-bs-target="#navbarNav" aria-controls="navbarNav"
             aria-expanded="false" aria-label="Toggle navigation">
         <span class="navbar-toggler-icon"></span>
     </button>
 
-    <div class="collapse navbar-collapse" id="navbarNav">
-        <ul class="navbar-nav ms-auto">
-            <!-- Головна сторінка (Список повідомлень) -->
-            <li class="nav-item">
-                <NavLink class="nav-link" href="/">
-                    Повідомлення
-                </NavLink>
-            </li>
+    @if (isUserAuthenticated)
+    {
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav ms-auto">
+                <!-- Звичайні пункти меню -->
+                <li class="nav-item">
+                    <NavLink class="nav-link" href="/">
+                        Повідомлення
+                    </NavLink>
+                </li>
+                <li class="nav-item">
+                    <NavLink class="nav-link" href="/create-request">
+                        Створити заявку
+                    </NavLink>
+                </li>
+                <li class="nav-item">
+                    <NavLink class="nav-link" href="/my-requests">
+                        Мої заявки
+                    </NavLink>
+                </li>
 
-            <!-- Створити заявку -->
-            <li class="nav-item">
-                <NavLink class="nav-link" href="/create-request">
-                    Створити заявку
-                </NavLink>
-            </li>
+                <!-- Додатковий пункт для керівника відділу -->
+                @if (isDepartmentHead)
+                {
+                    <li class="nav-item">
+                        <NavLink class="nav-link" href="/dept-requests">
+                            Заявки відділу
+                        </NavLink>
+                    </li>
+                }
 
-            <!-- Мої заявки -->
-            <li class="nav-item">
-                <NavLink class="nav-link" href="/my-requests">
-                    Мої заявки
-                </NavLink>
-            </li>
-        </ul>
-    </div>
+                @if (isWarehouseWorker)
+                {
+                    <li class="nav-item">
+                        <NavLink class="nav-link" href="/warehouse-grouped">
+                            Загальний список потреб
+                        </NavLink>
+                    </li>
+                    <li class="nav-item">
+                        <NavLink class="nav-link" href="/delivery-requests">
+                            Заявки на доставку
+                        </NavLink>
+                    </li>
+                }
+
+
+                <!-- Додатковий пункт для економіста -->
+                @if (isEconomist)
+                {
+                    <li class="nav-item">
+                        <NavLink class="nav-link" href="/eco-requests">
+                            Заявки для обробки
+                        </NavLink>
+                    </li>
+                    <li class="nav-item">
+                        <NavLink class="nav-link" href="/general-needs">
+                            Таблиця загальних потреб
+                        </NavLink>
+                    </li>
+                    <li class="nav-item">
+                        <NavLink class="nav-link" href="/net-needs">
+                            Таблиця чистих потреб
+                        </NavLink>
+                    </li>
+                }
+
+                <!-- Кнопка “Вихід” -->
+                <li class="nav-item">
+                    <button class="btn btn-link nav-link text-white"
+                            @onclick="Logout">
+                        Вихід
+                    </button>
+                </li>
+            </ul>
+        </div>
+    }
 </nav>
 
 <div class="container mt-4">
     @Body
 </div>
+
+@code {
+    [Inject] IJSRuntime JSRuntime { get; set; } = default!;
+    [Inject] AuthenticationStateProvider AuthStateProvider { get; set; } = default!;
+    [Inject] NavigationManager Navigation { get; set; } = default!;
+
+    private bool isUserAuthenticated;
+    private bool isDepartmentHead;
+    private bool isEconomist; // <--- Додана змінна
+    private bool isWarehouseWorker; // <--- нове поле
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Отримуємо поточний стан автентифікації
+        var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        var user = authState.User;
+
+
+        // Перевірка, чи користувач авторизований
+        isUserAuthenticated = user?.Identity?.IsAuthenticated ?? false;
+
+        // Якщо авторизований, перевіряємо ролі
+        if (isUserAuthenticated)
+        {
+            if (user.IsInRole("DepartmentHead"))
+            {
+                isDepartmentHead = true;
+            }
+            if (user.IsInRole("Economist"))
+            {
+                isEconomist = true;
+            }
+            if (user.IsInRole("WarehouseWorker")) isWarehouseWorker = true; // <---
+        }
+    }
+
+    private async Task Logout()
+    {
+        // Видаляємо токен із localStorage
+        await JSRuntime.InvokeVoidAsync("localStorage.removeItem", "authToken");
+
+        // Повідомляємо AuthStateProvider, що користувач більше не авторизований
+        if (AuthStateProvider is AutomationOfPurchases.Client.Auth.CustomAuthStateProvider customProvider)
+        {
+            customProvider.NotifyUserAuthenticationStateChanged();
+        }
+
+        // Перенаправляємося на сторінку логіну (з повним перезавантаженням)
+        Navigation.NavigateTo("/login", true);
+    }
+}

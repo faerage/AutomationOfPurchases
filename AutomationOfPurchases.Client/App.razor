@@ -7,18 +7,20 @@
                 <NotAuthorized Context="authContext">
                     @if (!(authContext.User?.Identity?.IsAuthenticated ?? false))
                     {
+                        <!-- Якщо користувач неавторизований -->
                         <RedirectToLogin />
                     }
                     else
                     {
-                        <p>You are not authorized to view this page.</p>
+                        <!-- Якщо авторизований, але не має потрібних прав/ролей -->
+                        <p>У Вас немає прав доступу до цієї сторінки.</p>
                     }
                 </NotAuthorized>
             </AuthorizeRouteView>
         </Found>
         <NotFound>
             <LayoutView Layout="@typeof(MainLayout)">
-                <p>Sorry, there's nothing at this address.</p>
+                <p>Сторінку не знайдено.</p>
             </LayoutView>
         </NotFound>
     </Router>

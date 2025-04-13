@@ -10,33 +10,47 @@
 
 @using System.Net.Http.Json
 
-<h3>Login</h3>
+<style>
+    .login-container {
+        /* Виставляємо ширину та відступи, щоб блок був по центру екрану */
+        max-width: 400px;
+        margin: 10vh auto; /* відступ зверху, щоб блок був приблизно по центру */
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 2rem;
+        background-color: #fff;
+    }
 
-<div class="container my-4">
-    <div class="row">
-        <div class="col-md-5">
-            <EditForm Model="@credentials" OnValidSubmit="@HandleValidSubmit" class="p-3 border rounded">
-                <div class="mb-3">
-                    <label class="form-label">User Name</label>
-                    <InputText class="form-control" @bind-Value="@credentials.UserName" />
-                </div>
+    .login-title {
+        text-align: center;
+        margin-bottom: 1rem;
+    }
+</style>
 
-                <div class="mb-3">
-                    <label class="form-label">Password</label>
-                    <InputText class="form-control" @bind-Value="@credentials.Password" type="password" />
-                </div>
+<div class="login-container">
+    <h3 class="login-title">Вхід до системи</h3>
 
-                <ValidationSummary />
+    <EditForm Model="@credentials" OnValidSubmit="@HandleValidSubmit">
+        <DataAnnotationsValidator />
+        <ValidationSummary />
 
-                <button type="submit" class="btn btn-primary">Log In</button>
-
-                @if (!string.IsNullOrEmpty(errorMessage))
-                {
-                    <div class="alert alert-danger mt-3">@errorMessage</div>
-                }
-            </EditForm>
+        <div class="mb-3">
+            <label class="form-label">Логін</label>
+            <InputText class="form-control" @bind-Value="@credentials.UserName" />
         </div>
-    </div>
+
+        <div class="mb-3">
+            <label class="form-label">Пароль</label>
+            <InputText class="form-control" @bind-Value="@credentials.Password" type="password" />
+        </div>
+
+        <button type="submit" class="btn btn-primary w-100">Увійти</button>
+
+        @if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="alert alert-danger mt-3">@errorMessage</div>
+        }
+    </EditForm>
 </div>
 
 @code {
@@ -59,23 +73,23 @@
                     // Зберігаємо токен у localStorage
                     await JSRuntime.InvokeVoidAsync("localStorage.setItem", "authToken", result.Token);
 
-                    // Повідомляємо провайдера, що користувач тепер авторизований
+                    // Повідомляємо провайдер, що користувач тепер авторизований
                     if (AuthStateProvider is Client.Auth.CustomAuthStateProvider customProvider)
                     {
                         customProvider.NotifyUserAuthenticationStateChanged();
                     }
 
-                    // Перенаправляємося на головну
+                    // Перенаправляємося на головну (або на /notifications)
                     Navigation.NavigateTo("/", true);
                 }
                 else
                 {
-                    errorMessage = "No token returned from server.";
+                    errorMessage = "Сервер не повернув дійсний токен.";
                 }
             }
             else
             {
-                errorMessage = "Invalid credentials.";
+                errorMessage = "Неправильний логін або пароль.";
             }
         }
         catch (Exception ex)
@@ -84,6 +98,7 @@
         }
     }
 
+    // Класи, потрібні для JSON-серіалізації
     class LoginRequest
     {
         public string UserName { get; set; } = string.Empty;

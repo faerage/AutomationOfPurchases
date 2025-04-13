@@ -1,36 +1,231 @@
-﻿@page "/"
+﻿@page "/notifications"
+@attribute [Authorize]
+@inject HttpClient Http
+@inject NavigationManager Navigation
 
-<h3>Мої повідомлення</h3>
+@using AutomationOfPurchases.Shared.DTOs
 
-@if (messages == null)
-{
-    <p>Завантаження...</p>
-}
-else if (messages.Count == 0)
-{
-    <p>Повідомлень поки немає.</p>
-}
-else
-{
-    <ul class="list-group">
-        @foreach (var msg in messages)
+<style>
+    .notifications-container {
+        max-width: 750px;
+        margin: 4rem auto 2rem auto;
+        background-color: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        padding: 2rem;
+    }
+
+    .notifications-title {
+        margin-bottom: 1.5rem;
+        text-align: center;
+    }
+
+    .notification-item-new {
+        border: 2px solid #428bca;
+        border-radius: 4px;
+        padding: 0.75rem;
+        margin-bottom: 0.5rem;
+        background-color: #f7fcff;
+    }
+
+    .notification-item-read {
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        padding: 0.75rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .notification-header {
+        font-weight: bold;
+        margin-bottom: 0.25rem;
+    }
+
+    .notification-date {
+        font-size: 0.85rem;
+        color: #777;
+    }
+
+    .notification-body {
+        margin-top: 0.25rem;
+    }
+
+    /* Стиль для кнопки фільтру */
+    .filter-button {
+        margin-bottom: 1.5rem;
+    }
+</style>
+
+<div class="notifications-container">
+    <h2 class="notifications-title">Повідомлення</h2>
+
+    <!-- Кнопка для вмикання/вимикання панелі фільтрації -->
+    <button class="btn btn-secondary filter-button" @onclick="ToggleFilter">
+        @(showFilter ? "Сховати фільтри" : "Фільтрація")
+    </button>
+
+    <!-- Панель фільтрації (відображається, якщо showFilter == true) -->
+    @if (showFilter)
+    {
+        <div class="border p-3 mb-4">
+            <h5>Фільтрація</h5>
+            <!-- Фільтр за заголовком повідомлення -->
+            <div class="mb-3">
+                <label class="form-label">Пошук у заголовку повідомлення:</label>
+                <input class="form-control"
+                       @bind="searchTitle"
+                       @bind:event="oninput"
+                       placeholder="Введіть фрагмент заголовку..." />
+            </div>
+            <!-- Фільтр за описом повідомлення -->
+            <div class="mb-3">
+                <label class="form-label">Пошук за описом повідомлення:</label>
+                <input class="form-control"
+                       @bind="searchDescription"
+                       @bind:event="oninput"
+                       placeholder="Введіть фрагмент опису..." />
+            </div>
+            <button class="btn btn-primary" @onclick="FilterNotifications">
+                Застосувати
+            </button>
+        </div>
+    }
+
+    @if (!notificationsLoaded)
+    {
+        <p>Завантаження повідомлень...</p>
+    }
+    else if (notifications == null)
+    {
+        <p>Помилка завантаження повідомлень.</p>
+    }
+    else
+    {
+        <h4>Непрочитані повідомлення</h4>
+        @if (newMessagesFiltered.Any())
         {
-            <li class="list-group-item">@msg</li>
+            @foreach (var notif in newMessagesFiltered)
+            {
+                <div class="notification-item-new d-flex justify-content-between align-items-center">
+                    <div class="notification-body-section">
+                        <div class="notification-header">@notif.Title</div>
+                        <div class="notification-date">@notif.CreatedAt.ToLocalTime()</div>
+                        <div class="notification-body">@notif.Message</div>
+                    </div>
+                    @if (!string.IsNullOrEmpty(notif.LinkUrl))
+                    {
+                        <button class="btn btn-primary btn-sm"
+                                @onclick="() => OnViewButtonClick(notif.LinkUrl, notif.NotificationId)">
+                            Переглянути
+                        </button>
+                    }
+                </div>
+            }
         }
-    </ul>
-}
+        else
+        {
+            <p>Немає нових повідомлень (фільтр застосовано).</p>
+        }
+
+        <h4 class="mt-4">Прочитані повідомлення</h4>
+        @if (readMessagesFiltered.Any())
+        {
+            @foreach (var notif in readMessagesFiltered)
+            {
+                <div class="notification-item-read d-flex justify-content-between align-items-center">
+                    <div class="notification-body-section">
+                        <div class="notification-header">@notif.Title</div>
+                        <div class="notification-date">@notif.CreatedAt.ToLocalTime()</div>
+                        <div class="notification-body">@notif.Message</div>
+                    </div>
+                    @if (!string.IsNullOrEmpty(notif.LinkUrl))
+                    {
+                        <button class="btn btn-secondary btn-sm"
+                                @onclick="() => Navigation.NavigateTo(notif.LinkUrl)">
+                            Переглянути
+                        </button>
+                    }
+                </div>
+            }
+        }
+        else
+        {
+            <p>Немає прочитаних повідомлень (фільтр застосовано).</p>
+        }
+    }
+</div>
 
 @code {
-    private List<string>? messages;
+    // Колекція повідомлень
+    private List<NotificationDTO>? notifications;
+    // Пошуковий запит за заголовком повідомлення
+    private string searchTitle = "";
+    // Пошуковий запит за описом повідомлення
+    private string searchDescription = "";
+
+    // Відфільтровані повідомлення
+    private List<NotificationDTO> newMessagesFiltered = new();
+    private List<NotificationDTO> readMessagesFiltered = new();
+
+    private bool notificationsLoaded = false;
+    private bool showFilter = false;
 
     protected override async Task OnInitializedAsync()
     {
-        // Тут можна викликати HttpClient, отримати список повідомлень з API
-        // Поки що "заглушка":
-        messages = new List<string>()
+        // Завантаження повідомлень поточного користувача
+        notifications = await Http.GetFromJsonAsync<List<NotificationDTO>>("api/notification/my");
+        notificationsLoaded = true;
+
+        FilterNotifications();
+    }
+
+    private void ToggleFilter() => showFilter = !showFilter;
+
+    private void FilterNotifications()
+    {
+        if (notifications == null)
+            return;
+
+        var filtered = notifications.AsEnumerable();
+
+        // Фільтрація за заголовком повідомлення
+        if (!string.IsNullOrWhiteSpace(searchTitle))
         {
-            "Ви маєте нову відповідь від економіста",
-            "Запит №1234 затверджено"
-        };
+            var lowerSearch = searchTitle.ToLower();
+            filtered = filtered.Where(n => (n.Title ?? "").ToLower().Contains(lowerSearch));
+        }
+
+        // Фільтрація за описом повідомлення (Message)
+        if (!string.IsNullOrWhiteSpace(searchDescription))
+        {
+            var lowerDesc = searchDescription.ToLower();
+            filtered = filtered.Where(n => (n.Message ?? "").ToLower().Contains(lowerDesc));
+        }
+
+        newMessagesFiltered = filtered.Where(n => !n.IsRead)
+                                      .OrderByDescending(n => n.CreatedAt)
+                                      .ToList();
+        readMessagesFiltered = filtered.Where(n => n.IsRead)
+                                       .OrderByDescending(n => n.CreatedAt)
+                                       .ToList();
+    }
+
+    private async void OnViewButtonClick(string linkUrl, int notifId)
+    {
+        Navigation.NavigateTo(linkUrl);
+        await MarkAsRead(notifId);
+    }
+
+    private async Task MarkAsRead(int notifId)
+    {
+        var response = await Http.PutAsync($"api/notification/{notifId}/mark-read", null);
+        if (response.IsSuccessStatusCode)
+        {
+            var notif = notifications?.FirstOrDefault(n => n.NotificationId == notifId);
+            if (notif != null)
+            {
+                notif.IsRead = true;
+            }
+            FilterNotifications();
+        }
     }
 }

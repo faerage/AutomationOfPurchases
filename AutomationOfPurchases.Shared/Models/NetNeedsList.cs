@@ -10,7 +10,7 @@ namespace AutomationOfPurchases.Shared.Models
         public DateTime CreationDate { get; set; }
         public DateTime? NullificationDate { get; set; }
 
-        public virtual ICollection<RequestItem> Items { get; set; }
-            = new List<RequestItem>();
+        public virtual ICollection<NetNeedsItem> Items { get; set; }
+            = new List<NetNeedsItem>();
     }
 }

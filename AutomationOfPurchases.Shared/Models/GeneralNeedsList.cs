@@ -12,7 +12,7 @@ namespace AutomationOfPurchases.Shared.Models
 
         // Припустимо, що маємо список RequestItem, який пов'язуємо через проміжну таблицю
         // або ключ із RequestItem. Тут показано підхід "один-до-багатьох" для прикладу:
-        public virtual ICollection<RequestItem> Items { get; set; }
-            = new List<RequestItem>();
+        public virtual ICollection<GeneralNeedsItem> Items { get; set; }
+            = new List<GeneralNeedsItem>();
     }
 }

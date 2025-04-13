@@ -1,0 +1,283 @@
+﻿@page "/warehouse-grouped"
+@attribute [Authorize(Roles = "WarehouseWorker")]
+@inject HttpClient Http
+@inject IJSRuntime JSRuntime
+
+@using AutomationOfPurchases.Shared.DTOs
+
+<h3>Список загальних потреб</h3>
+
+<!-- Перемикач фільтра: -->
+<button class="btn btn-secondary mb-3" @onclick="ToggleFilter">
+    @(showFilter ? "Сховати фільтр" : "Фільтрація")
+</button>
+
+@if (showFilter)
+{
+    <div class="border p-3 mb-3">
+        <div class="row g-3">
+            <div class="col-md-4">
+                <label class="form-label">Назва ТМЦ</label>
+                <input class="form-control"
+                       @bind="filterTmc"
+                       @bind:event="oninput"
+                       placeholder="Введіть назву..." />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Департамент</label>
+                <input class="form-control"
+                       @bind="filterDept"
+                       @bind:event="oninput"
+                       placeholder="Введіть відділ..." />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Замовник</label>
+                <input class="form-control"
+                       @bind="filterUser"
+                       @bind:event="oninput"
+                       placeholder="ПІБ замовника..." />
+            </div>
+        </div>
+
+        <button class="btn btn-primary mt-3" @onclick="ApplyFilter">
+            Застосувати
+        </button>
+    </div>
+}
+
+@if (groupedNeeds == null)
+{
+    <p>Завантаження...</p>
+}
+else if (!groupedNeeds.Any())
+{
+    <p>Немає активного списку потреб або він порожній.</p>
+}
+else
+{
+    <div class="card mb-4 shadow-sm">
+        <div class="card-body">
+            @foreach (var group in filteredNeeds)
+            {
+                <table class="table table-striped table-bordered table-sm align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>ТМЦ (ItemName)</th>
+                            <th style="width:100px;">Одиниця</th>
+                            <th style="width:120px;">Загальна</th>
+                            <th style="width:120px;"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>@group.ItemName</strong></td>
+                            <td>@group.StorageUnit</td>
+                            <td>@group.TotalQuantity</td>
+                            <td>
+                                <button class="btn btn-sm btn-secondary" @onclick="@(() => ToggleExpand(group))">
+                                    @(group.IsExpanded ? "Сховати" : "Розкрити")
+                                </button>
+                            </td>
+                        </tr>
+
+                        @if (group.IsExpanded)
+                        {
+                            <tr>
+                                <td colspan="4">
+                                    <table class="table table-bordered table-sm">
+                                        <thead class="table-light">
+                                            <tr>
+                                                <th>Відділ</th>
+                                                <th>Замовник</th>
+                                                <th>Кількість</th>
+                                                <th>Дії</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var req in group.Requests)
+                                            {
+                                                <tr>
+                                                    <td>@req.DepartmentName</td>
+                                                    <td>@req.OrderedByFullName</td>
+                                                    <td>@req.Quantity</td>
+                                                    <td>
+                                                        <button class="btn btn-sm btn-success me-2"
+                                                                @onclick="() => SatisfyRequest(req, group)">
+                                                            Задовольнити
+                                                        </button>
+                                                        <button class="btn btn-sm btn-warning"
+                                                                @onclick="() => MarkNotAvailable(req, group)">
+                                                            Відсутня
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    private List<GroupedNeedDTO>? groupedNeeds;
+    private List<GroupedNeedDTO> filteredNeeds = new();
+
+    // Фільтр
+    private bool showFilter = false;
+    private string filterTmc = "";
+    private string filterDept = "";
+    private string filterUser = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadGroupedNeedsAsync();
+    }
+
+    private async Task LoadGroupedNeedsAsync()
+    {
+        groupedNeeds = await Http.GetFromJsonAsync<List<GroupedNeedDTO>>("api/warehouse/grouped-needs");
+        filteredNeeds = groupedNeeds ?? new List<GroupedNeedDTO>();
+    }
+
+    private void ToggleFilter() => showFilter = !showFilter;
+
+    private void ApplyFilter()
+    {
+        if (groupedNeeds == null) return;
+
+        var query = groupedNeeds.AsEnumerable();
+
+        if (!string.IsNullOrWhiteSpace(filterTmc))
+        {
+            var tmcLow = filterTmc.ToLower();
+            query = query.Where(g => (g.ItemName ?? "").ToLower().Contains(tmcLow));
+        }
+        if (!string.IsNullOrWhiteSpace(filterDept))
+        {
+            var deptLow = filterDept.ToLower();
+            query = query
+                .Select(g =>
+                {
+                    var newRequests = g.Requests
+                        .Where(r => r.DepartmentName.ToLower().Contains(deptLow))
+                        .ToList();
+                    return new GroupedNeedDTO
+                        {
+                            ItemId = g.ItemId,
+                            ItemName = g.ItemName,
+                            StorageUnit = g.StorageUnit,
+                            TotalQuantity = g.TotalQuantity,
+                            IsExpanded = g.IsExpanded,
+                            Requests = newRequests
+                        };
+                })
+                .Where(g => g.Requests.Any());
+        }
+        if (!string.IsNullOrWhiteSpace(filterUser))
+        {
+            var userLow = filterUser.ToLower();
+            query = query
+                .Select(g =>
+                {
+                    var newReq = g.Requests
+                        .Where(r => r.OrderedByFullName.ToLower().Contains(userLow))
+                        .ToList();
+                    return new GroupedNeedDTO
+                        {
+                            ItemId = g.ItemId,
+                            ItemName = g.ItemName,
+                            StorageUnit = g.StorageUnit,
+                            TotalQuantity = g.TotalQuantity,
+                            IsExpanded = g.IsExpanded,
+                            Requests = newReq
+                        };
+                })
+                .Where(g => g.Requests.Any());
+        }
+
+        filteredNeeds = query.ToList();
+    }
+
+    private void ToggleExpand(GroupedNeedDTO group)
+    {
+        group.IsExpanded = !group.IsExpanded;
+    }
+
+    private async Task SatisfyRequest(DepartmentRequestDTO req, GroupedNeedDTO group)
+    {
+        // Prompt для кількості
+        var qtyStr = await JSRuntime.InvokeAsync<string>("prompt", $"Вкажіть кількість (макс: {req.Quantity}):", req.Quantity.ToString());
+        if (!int.TryParse(qtyStr, out int qty) || qty <= 0 || qty > req.Quantity)
+        {
+            await JSRuntime.InvokeVoidAsync("alert", "Невірна кількість.");
+            return;
+        }
+
+        // Prompt для назви складу
+        var warehouseName = await JSRuntime.InvokeAsync<string>("prompt", "Назва складу:", "Основний склад");
+        if (string.IsNullOrWhiteSpace(warehouseName))
+        {
+            await JSRuntime.InvokeVoidAsync("alert", "Склад не може бути порожнім.");
+            return;
+        }
+
+        // Формуємо SatisfyNeedModel
+        var model = new SatisfyNeedModel
+            {
+            // Тепер RequestItemId в DepartmentRequestDTO зберігає саме GeneralNeedsItemId
+                GeneralNeedsItemId = req.RequestItemId,
+                QuantityToSatisfy = qty,
+                WarehouseName = warehouseName,
+                IsNotAvailable = false
+            };
+
+        var response = await Http.PostAsJsonAsync("api/warehouse/satisfy", model);
+        if (response.IsSuccessStatusCode)
+        {
+            var msg = await response.Content.ReadAsStringAsync();
+            await JSRuntime.InvokeVoidAsync("alert", msg);
+            // Перезавантажимо список
+            await LoadGroupedNeedsAsync();
+            ApplyFilter(); // якщо треба фільтр
+        }
+        else
+        {
+            var err = await response.Content.ReadAsStringAsync();
+            await JSRuntime.InvokeVoidAsync("alert", $"Помилка: {err}");
+        }
+    }
+
+    private async Task MarkNotAvailable(DepartmentRequestDTO req, GroupedNeedDTO group)
+    {
+        var confirm = await JSRuntime.InvokeAsync<bool>("confirm", "Позначити як відсутня?");
+        if (!confirm) return;
+
+        var model = new SatisfyNeedModel
+            {
+                GeneralNeedsItemId = req.RequestItemId,
+                QuantityToSatisfy = 0,
+                WarehouseName = "",
+                IsNotAvailable = true
+            };
+
+        var response = await Http.PostAsJsonAsync("api/warehouse/satisfy", model);
+        if (response.IsSuccessStatusCode)
+        {
+            var msg = await response.Content.ReadAsStringAsync();
+            await JSRuntime.InvokeVoidAsync("alert", msg);
+            await LoadGroupedNeedsAsync();
+            ApplyFilter();
+        }
+        else
+        {
+            var err = await response.Content.ReadAsStringAsync();
+            await JSRuntime.InvokeVoidAsync("alert", $"Помилка: {err}");
+        }
+    }
+}

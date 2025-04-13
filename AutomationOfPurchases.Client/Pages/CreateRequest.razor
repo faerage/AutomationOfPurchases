@@ -1,33 +1,325 @@
 ﻿@page "/create-request"
+@inject HttpClient Http
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
 
-<h3>Створити нову заявку</h3>
+@using AutomationOfPurchases.Shared.DTOs
+@using AutomationOfPurchases.Shared.Enums
 
-<EditForm Model="@newRequest" OnValidSubmit="@HandleValidSubmit">
-    <div class="mb-3">
-        <label class="form-label">Назва</label>
-        <InputText class="form-control" @bind-Value="@newRequest.Title" />
-    </div>
-    <div class="mb-3">
-        <label class="form-label">Опис</label>
-        <InputTextArea class="form-control" @bind-Value="@newRequest.Description" />
-    </div>
+<h3>Створення заявки</h3>
 
-    <button type="submit" class="btn btn-primary">Надіслати</button>
-</EditForm>
+@if (items == null)
+{
+    <p>Завантаження списку ТМЦ...</p>
+}
+else
+{
+    <EditForm Model="@requestDto" OnValidSubmit="@HandleValidSubmit">
+        <DataAnnotationsValidator />
+        <ValidationSummary />
+
+        <!-- Назва заявки -->
+        <div class="mb-3">
+            <label class="form-label">Назва заявки</label>
+            <InputText class="form-control"
+                       @bind-Value="requestDto.Title"
+                       placeholder="Назва повинна відображати головне, що потрібно закупити." />
+        </div>
+
+        <!-- Опис заявки -->
+        <div class="mb-3">
+            <label class="form-label">Опис заявки</label>
+            <InputTextArea class="form-control"
+                           @bind-Value="requestDto.Description"
+                           rows="3"
+                           placeholder="Коротко опишіть що та навіщо потрібно закупити." />
+        </div>
+
+        <h5>Додати ТМЦ</h5>
+        <!-- Поле додавання ТМЦ з відображенням одиниці виміру -->
+        <div class="row g-2 align-items-end">
+            <div class="col-md-5 position-relative">
+                <label class="form-label">Назва</label>
+                <input class="form-control"
+                       type="text"
+                       placeholder="Введіть назву ТМЦ..."
+                       @bind-value="typedItemName"
+                       @bind-value:event="oninput"
+                       @bind-value:after="HandleItemNameChanged"
+                       @onfocus="HandleItemNameChanged"
+                       @onblur="HideSuggestions" />
+                @if (showSuggestions && suggestions.Any())
+                {
+                    <ul class="list-group" style="position: absolute; z-index: 999; width: 100%; max-height: 200px; overflow-y: auto;">
+                        @foreach (var it in suggestions)
+                        {
+                            <!-- Використовуємо onmousedown, щоб вибір елемента відбувався до втрати фокусу -->
+                            <li class="list-group-item list-group-item-action"
+                                @onmousedown="() => SelectItem(it)">
+                                @it.ItemName (@it.StorageUnit)
+                            </li>
+                        }
+                    </ul>
+                }
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Одиниця виміру</label>
+                <input class="form-control"
+                       type="text"
+                       readonly
+                       value="@(selectedItem?.StorageUnit)"
+                       placeholder="Одиниця" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Кількість</label>
+                <input class="form-control" type="number" @bind="selectedQuantity" min="1" />
+            </div>
+            <div class="col-md-3" style="padding-bottom: 0.5rem;">
+                <button type="button" class="btn btn-success w-100"
+                        @onclick="AddPosition"
+                        disabled="@( !CanAddPosition )">
+                    Додати
+                </button>
+            </div>
+        </div>
+
+        <!-- Список позицій у заявці -->
+        <div class="mt-3">
+            <h5>Список ТМЦ у заявці</h5>
+            @if (!requestDto.Items.Any())
+            {
+                <p>Поки що жодної позиції</p>
+            }
+            else
+            {
+                <table class="table table-sm">
+                    <thead>
+                        <tr>
+                            <th>ТМЦ</th>
+                            <th>Одиниця виміру</th>
+                            <th>Кількість</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var ri in requestDto.Items)
+                        {
+                            var item = items.FirstOrDefault(i => i.ItemId == ri.ItemId);
+                            <tr>
+                                <td>@item?.ItemName</td>
+                                <td>@item?.StorageUnit</td>
+                                <td>
+                                    <InputNumber class="form-control"
+                                                 @bind-Value="ri.Quantity"
+                                                 min="1" />
+                                </td>
+                                <td>
+                                    <button class="btn btn-link text-danger" @onclick="() => RemovePosition(ri)">
+                                        Видалити
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+
+        <button type="submit" class="btn btn-primary mt-3 me-3" disabled="@(!CanSaveRequest)">
+            Створити заявку
+        </button>
+        <button type="button" class="btn btn-secondary mt-3" @onclick="SaveAsDraft" disabled="@(!CanSaveRequest)">
+            Зберегти як чернетку
+        </button>
+    </EditForm>
+}
+
+@if (!string.IsNullOrEmpty(message))
+{
+    <div class="alert alert-info mt-3">@message</div>
+}
 
 @code {
-    private RequestModel newRequest = new();
+    private List<ItemDTO>? items;
+    private RequestDTO requestDto = new RequestDTO
+        {
+            Items = new List<RequestItemDTO>()
+        };
 
-    private async Task HandleValidSubmit()
+    private string? message;
+
+    // Поле для автодоповнення
+    private string typedItemName = "";
+    private List<ItemDTO> suggestions = new List<ItemDTO>();
+    private bool showSuggestions = false;
+    private ItemDTO? selectedItem;
+
+    // Поле для кількості
+    private int selectedQuantity = 1;
+
+    // Кнопка "Додати" активна, якщо обрано ТМЦ та введено кількість > 0
+    private bool CanAddPosition => selectedItem != null && selectedQuantity > 0;
+
+    // Заявку можна зберегти лише якщо заповнені поля Назва, Опис та додано хоча б один ТМЦ
+    private bool CanSaveRequest =>
+        !string.IsNullOrWhiteSpace(requestDto.Title) &&
+        !string.IsNullOrWhiteSpace(requestDto.Description) &&
+        requestDto.Items.Any();
+
+    protected override async Task OnInitializedAsync()
     {
-        // Тут відправляємо newRequest на API, наприклад:
-        // await Http.PostAsJsonAsync("api/requests", newRequest);
-        // Потім можна показати повідомлення чи перейти на "Мої заявки"
+        try
+        {
+            // Завантаження чернетки, якщо є query-параметр "draftId"
+            var uri = Navigation.ToAbsoluteUri(Navigation.Uri);
+            var queryParams = System.Web.HttpUtility.ParseQueryString(uri.Query);
+            var draftIdStr = queryParams["draftId"];
+            if (!string.IsNullOrEmpty(draftIdStr) && int.TryParse(draftIdStr, out int draftId))
+            {
+                var draft = await Http.GetFromJsonAsync<RequestDTO>($"api/request/my/{draftId}");
+                if (draft != null && draft.Status == RequestStatus.Draft)
+                {
+                    requestDto = draft;
+                }
+                else
+                {
+                    message = "Неможливо завантажити чернетку або вона не має статусу Draft.";
+                }
+            }
+
+            // Завантаження списку ТМЦ
+            items = await Http.GetFromJsonAsync<List<ItemDTO>>("api/item");
+        }
+        catch (Exception ex)
+        {
+            message = "Помилка завантаження даних: " + ex.Message;
+            items = new List<ItemDTO>();
+        }
     }
 
-    class RequestModel
+    private void HandleItemNameChanged()
     {
-        public string Title { get; set; } = string.Empty;
-        public string Description { get; set; } = string.Empty;
+        if (string.IsNullOrWhiteSpace(typedItemName))
+        {
+            // Показуємо ВСІ items
+            suggestions = items!.ToList();
+            showSuggestions = suggestions.Any();
+        }
+        else
+        {
+            // Фільтруємо за typedItemName, але теж БЕЗ обмеження
+            suggestions = items!
+                .Where(i => i.ItemName.Contains(typedItemName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            showSuggestions = suggestions.Any();
+        }
+    }
+
+
+    private void HideSuggestions() => showSuggestions = false;
+
+    private void SelectItem(ItemDTO item)
+    {
+        selectedItem = item;
+        typedItemName = item.ItemName;
+        showSuggestions = false;
+    }
+
+    private void AddPosition()
+    {
+        if (selectedItem == null)
+        {
+            message = "Спочатку оберіть ТМЦ зі списку.";
+            return;
+        }
+        if (selectedQuantity <= 0)
+        {
+            message = "Невірна кількість.";
+            return;
+        }
+
+        requestDto.Items.Add(new RequestItemDTO
+            {
+                ItemId = selectedItem.ItemId,
+                Quantity = selectedQuantity
+            });
+
+        // Очищення полів для наступного вводу
+        typedItemName = "";
+        selectedItem = null;
+        selectedQuantity = 1;
+        message = null;
+        showSuggestions = false;
+        suggestions.Clear();
+    }
+
+    private void RemovePosition(RequestItemDTO ri)
+    {
+        requestDto.Items.Remove(ri);
+    }
+
+    /// <summary>
+    /// Обробка збереження заявки у "бойовому" режимі (не Draft)
+    /// </summary>
+    private async Task HandleValidSubmit()
+    {
+        var confirm = await JSRuntime.InvokeAsync<bool>("confirm", new object[] { "Потім змінити дані буде неможливо. Ви впевнені?" });
+        if (!confirm)
+            return;
+
+        requestDto.Status = RequestStatus.PendingDepartmentHead;
+        await SaveOrUpdateAsync();
+    }
+
+    /// <summary>
+    /// Збереження як чернетки (Draft)
+    /// </summary>
+    private async Task SaveAsDraft()
+    {
+        requestDto.Status = RequestStatus.Draft;
+        await SaveOrUpdateAsync();
+    }
+
+    /// <summary>
+    /// Виконує POST (створення) або PUT (оновлення) заявки
+    /// </summary>
+    private async Task SaveOrUpdateAsync()
+    {
+        try
+        {
+            HttpResponseMessage resp;
+            if (requestDto.RequestId > 0)
+            {
+                resp = await Http.PutAsJsonAsync($"api/request/{requestDto.RequestId}", requestDto);
+            }
+            else
+            {
+                resp = await Http.PostAsJsonAsync("api/request", requestDto);
+            }
+
+            if (resp.IsSuccessStatusCode)
+            {
+                var saved = await resp.Content.ReadFromJsonAsync<RequestDTO>();
+                if (saved != null)
+                {
+                    requestDto = saved;
+                    message = "Заявку збережено успішно.";
+
+                    if (requestDto.Status != RequestStatus.Draft)
+                    {
+                        Navigation.NavigateTo("/my-requests", true);
+                    }
+                }
+            }
+            else
+            {
+                var err = await resp.Content.ReadAsStringAsync();
+                message = $"Помилка збереження: {err}";
+            }
+        }
+        catch (Exception ex)
+        {
+            message = $"Помилка: {ex.Message}";
+        }
     }
 }

@@ -8,11 +8,14 @@ namespace AutomationOfPurchases.API.Services.Mappings
     {
         public UserProfile()
         {
-            // Відображення User -> UserDTO
+            // Мапінг для AppUser <-> UserDTO
             CreateMap<AppUser, UserDTO>()
-                // За потреби можна налаштувати додаткові ForMember
                 .ReverseMap();
-            // ReverseMap() робить і зворотне мапування (UserDTO -> User)
+
+            // Додаємо мапінг для Department <-> DepartmentDTO,
+            // щоб AutoMapper міг коректно відобразити властивість Department у UserDTO
+            CreateMap<Department, DepartmentDTO>()
+                .ReverseMap();
         }
     }
 }

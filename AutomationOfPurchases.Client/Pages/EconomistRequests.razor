@@ -1,0 +1,160 @@
+﻿@page "/eco-requests"
+@attribute [Authorize(Roles = "Economist")]
+@inject HttpClient Http
+@inject IJSRuntime JSRuntime
+@inject NavigationManager Navigation
+
+@using AutomationOfPurchases.Shared.DTOs
+@using AutomationOfPurchases.Shared.Enums
+@using AutomationOfPurchases.Shared.Localization
+
+<h3>Заявки для економіста</h3>
+
+<!-- Перемикач "Показати розглянуті заявки" -->
+<div class="form-check form-switch mb-3">
+    <input class="form-check-input" type="checkbox" role="switch"
+           id="showReviewedSwitch"
+           @bind="showReviewedRequests" />
+    <label class="form-check-label" for="showReviewedSwitch">
+        Показати розглянуті заявки
+    </label>
+</div>
+
+<!-- Поле пошуку за назвою заявки -->
+<div class="mb-3">
+    <label class="form-label">Пошук за назвою заявки:</label>
+    <input type="text" class="form-control" @bind="searchTitle"
+           placeholder="Введіть фрагмент назви" />
+</div>
+
+<!-- Поле пошуку за автором заявки -->
+<div class="mb-3">
+    <label class="form-label">Пошук за автором заявки:</label>
+    <input type="text" class="form-control" @bind="searchAuthor"
+           placeholder="Введіть фрагмент імені автора" />
+</div>
+
+@if (requests == null)
+{
+    <p>Завантаження...</p>
+}
+else
+{
+    var filteredRequests = GetFilteredRequests();
+    if (!filteredRequests.Any())
+    {
+        <p>Немає заявок для відображення</p>
+    }
+    else
+    {
+        <table class="table table-hover">
+            <thead>
+                <tr>
+                    <th>Назва заявки</th>
+                    <th>Автор заявки</th>
+                    <th>Відділ замовника</th>
+                    <th>Статус заявки</th>
+                    <th>Дата створення</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in filteredRequests)
+                {
+                    <tr>
+                        <td>@r.Title</td>
+                        <td>@r.OrderedByFullName</td>
+                        <td>@r.OrderedByDepartmentName</td> <!-- НОВА КОЛОНКА -->
+                        <td>@RequestStatusLocalizer.Localize(r.Status)</td>
+                        <td>@r.CreationDate.ToLocalTime()</td>
+                        <td>
+                            <button class="btn btn-primary btn-sm"
+                                    @onclick="() => ViewRequest(r.RequestId)">
+                                Переглянути заявку
+                            </button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+}
+
+@if (!string.IsNullOrEmpty(message))
+{
+    <div class="alert alert-info mt-3">@message</div>
+}
+
+@code {
+    private List<RequestDTO>? requests;
+    private string? message;
+
+    // Перемикач: показувати Approved/Rejected чи лише PendingEconomist
+    private bool showReviewedRequests = false;
+
+    // Поля пошуку
+    private string? searchTitle;
+    private string? searchAuthor;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadRequestsAsync();
+    }
+
+    private async Task LoadRequestsAsync()
+    {
+        try
+        {
+            // GET: api/request/economist
+            requests = await Http.GetFromJsonAsync<List<RequestDTO>>("api/request/economist");
+        }
+        catch (Exception ex)
+        {
+            message = $"Помилка завантаження: {ex.Message}";
+        }
+    }
+
+    private void ViewRequest(int requestId)
+    {
+        Navigation.NavigateTo($"/request-details/{requestId}");
+    }
+
+    private IEnumerable<RequestDTO> GetFilteredRequests()
+    {
+        if (requests == null)
+            return Enumerable.Empty<RequestDTO>();
+
+        var query = requests.AsEnumerable();
+
+        // Якщо перемикач вимкнено,
+        // показуємо лише ті, що в статусі PendingEconomist
+        if (!showReviewedRequests)
+        {
+            query = query.Where(r => r.Status == RequestStatus.PendingEconomist);
+        }
+        else
+        {
+            // Якщо перемикач увімкнено,
+            // показуємо всі заявки, крім Draft
+            query = query.Where(r => r.Status != RequestStatus.Draft);
+        }
+
+        // Пошук за назвою заявки
+        if (!string.IsNullOrWhiteSpace(searchTitle))
+        {
+            var lowerTitle = searchTitle.ToLower();
+            query = query.Where(r => (r.Title ?? "").ToLower().Contains(lowerTitle));
+        }
+
+        // Пошук за автором заявки
+        if (!string.IsNullOrWhiteSpace(searchAuthor))
+        {
+            var lowerAuth = searchAuthor.ToLower();
+            query = query.Where(r => (r.OrderedByFullName ?? "").ToLower().Contains(lowerAuth));
+        }
+
+        query = query.OrderByDescending(r => r.CreationDate);
+
+        return query;
+    }
+}

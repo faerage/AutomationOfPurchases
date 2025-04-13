@@ -1,0 +1,329 @@
+﻿@page "/request-details/{requestId:int}"
+@attribute [Authorize]
+
+@inject HttpClient Http
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+@inject AuthenticationStateProvider AuthStateProvider
+
+@using Microsoft.AspNetCore.Components.Authorization
+@using System.Security.Claims
+
+@using AutomationOfPurchases.Shared.DTOs
+@using AutomationOfPurchases.Shared.Enums
+@using AutomationOfPurchases.Shared.Localization
+
+<h3>Деталі заявки</h3>
+
+@if (request == null)
+{
+    <p>Завантаження заявки...</p>
+}
+else
+{
+    <!-- Основна картка з інформацією про заявку -->
+    <div class="card mb-4 shadow-sm">
+        <div class="card-body">
+            <h4 class="card-title">@request.Title</h4>
+            <p class="card-text text-muted">@request.Description</p>
+
+            <p>
+                <strong>Статус:</strong>
+                <span class="badge @(GetStatusBadgeClass(request.Status))">
+                    @RequestStatusLocalizer.Localize(request.Status)
+                </span>
+            </p>
+
+            @if (request.Status == RequestStatus.Approved && isAuthor)
+            {
+                <div class="alert alert-info">
+                    Заявка пройшла процедуру затвердження, очікуйте повідомлення про деталі доставки.
+                </div>
+            }
+
+            <p>
+                <strong>Дата створення:</strong>
+                @request.CreationDate.ToLocalTime();
+            </p>
+            <p>
+                <strong>Створено користувачем:</strong>
+                @request.OrderedByFullName (@request.OrderedByEmail)
+            </p>
+            <p>
+                <strong>Відділ замовника:</strong>
+                @request.OrderedByDepartmentName
+            </p>
+
+            @if (!string.IsNullOrEmpty(request.DepartmentHeadApproverId))
+            {
+                <p>
+                    Затверджено керівником:
+                    <strong>@request.DepartmentHeadApproverFullName</strong>
+                </p>
+            }
+
+            @if (!string.IsNullOrEmpty(request.EconomistApproverId))
+            {
+                <p>
+                    Затверджено економістом:
+                    <strong>@request.EconomistApproverFullName</strong>
+                </p>
+            }
+
+            @if (request.Status == RequestStatus.Rejected)
+            {
+                <p>
+                    Відхилено користувачем:
+                    <strong>@request.RejectedByUserFullName</strong>
+                </p>
+                <p>
+                    Причина відхилення:
+                    <em>@request.RejectionReason</em>
+                </p>
+            }
+        </div>
+    </div>
+
+    <!-- ТМЦ у цій заявці -->
+    <h5>ТМЦ у цій заявці</h5>
+    @if (request.Items == null || request.Items.Count == 0)
+    {
+        <p>Поки що немає доданих ТМЦ</p>
+    }
+    else
+    {
+        <table class="table table-striped table-bordered table-sm align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th>ТМЦ (Item)</th>
+                    <th style="width:100px;">Кількість</th>
+                    @if (request.Status == RequestStatus.Approved)
+                    {
+                        <th style="width:230px;">Зі складу / На закупівлю</th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var item in request.Items)
+                {
+                    <tr>
+                        <td>
+                            <strong>@item.Item?.ItemName</strong>
+                            <small class="text-muted">(@item.Item?.StorageUnit)</small>
+                        </td>
+                        <td>@item.Quantity</td>
+                        @if (request.Status == RequestStatus.Approved)
+                        {
+                            <td>
+                                @item.DeliveredQuantity / @item.ToPurchaseQuantity
+                            </td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <!-- Кнопки дій для керівника або економіста -->
+    <div class="mt-3">
+        @* Для керівника відділу *@
+        @if (isDepartmentHead
+       && request.Status == RequestStatus.PendingDepartmentHead)
+        {
+            <button class="btn btn-success me-2" @onclick="ApproveAsDepartmentHead">
+                Затвердити
+            </button>
+            <button class="btn btn-danger" @onclick="RejectAsDepartmentHead">
+                Відхилити
+            </button>
+        }
+        @* Для економіста - 
+           1) користувач має роль економіста
+           2) бекенд сказав request.CanApproveAsEconomist = true
+           3) user не є автором заявки
+           4) статус заявки PendingEconomist *@
+        else if (isEconomist
+        && request.CanApproveAsEconomist
+        && request.Status == RequestStatus.PendingEconomist)
+        {
+            <button class="btn btn-success me-2" @onclick="ApproveAsEconomist">
+                Затвердити
+            </button>
+            <button class="btn btn-danger" @onclick="RejectAsEconomist">
+                Відхилити
+            </button>
+        }
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(message))
+{
+    <div class="alert alert-info mt-3">@message</div>
+}
+
+@code {
+    [Parameter] public int requestId { get; set; }
+    private RequestDTO? request;
+    private string? message;
+
+    // Флаги ролей
+    private bool isDepartmentHead = false;
+    private bool isEconomist = false;
+    private bool isAuthor = false;
+
+    private string? currentUserId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // 1) Отримуємо стан автентифікації
+        var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        var user = authState.User;
+
+        // 2) userId (NameIdentifier)
+        currentUserId = user.FindFirstValue(ClaimTypes.NameIdentifier);
+
+        // 3) Визначаємо ролі
+        isDepartmentHead = user.IsInRole("DepartmentHead");
+        isEconomist = user.IsInRole("Economist");
+
+        // 4) Завантажуємо заявку
+        await LoadRequestAsync();
+
+        // 5) Якщо заявку отримано — визначаємо, чи автор
+        if (request != null && request.OrderedById == currentUserId)
+        {
+            isAuthor = true;
+        }
+    }
+
+    private async Task LoadRequestAsync()
+    {
+        try
+        {
+            // Якщо ви керівник чи економіст,
+            // можете викликати один ендпоінт: "api/request/{requestId}"
+            // Якщо автор — інший: "api/request/my/{requestId}"
+            // (або ж сервер сам вирішує, що повертати)
+            string url = (isDepartmentHead || isEconomist)
+                ? $"api/request/{requestId}"
+                : $"api/request/my/{requestId}";
+
+            request = await Http.GetFromJsonAsync<RequestDTO>(url);
+        }
+        catch (Exception ex)
+        {
+            message = "Помилка завантаження заявки: " + ex.Message;
+        }
+    }
+
+    private string GetStatusBadgeClass(RequestStatus status)
+    {
+        return status switch
+        {
+            RequestStatus.Draft => "bg-secondary",
+            RequestStatus.PendingDepartmentHead => "bg-warning text-dark",
+            RequestStatus.PendingEconomist => "bg-warning text-dark",
+            RequestStatus.Approved => "bg-success",
+            RequestStatus.Rejected => "bg-danger",
+            _ => "bg-secondary"
+        };
+    }
+
+    private async Task ApproveAsDepartmentHead()
+    {
+        if (request == null) return;
+        try
+        {
+            var confirm = await JSRuntime.InvokeAsync<bool>(
+                "confirm",
+                "Ви дійсно бажаєте затвердити цю заявку?"
+            );
+            if (!confirm) return;
+
+            var response = await Http.PutAsync($"api/request/{requestId}/approve", null);
+            if (response.IsSuccessStatusCode)
+            {
+                message = "Заявку успішно затверджено керівником.";
+                await LoadRequestAsync();
+            }
+            else
+            {
+                var err = await response.Content.ReadAsStringAsync();
+                message = $"Помилка при затвердженні: {err}";
+            }
+        }
+        catch (Exception ex)
+        {
+            message = $"Помилка: {ex.Message}";
+        }
+    }
+
+    private async Task RejectAsDepartmentHead()
+    {
+        if (request == null) return;
+        var reason = await JSRuntime.InvokeAsync<string>("prompt", "Вкажіть причину відхилення:");
+        if (string.IsNullOrWhiteSpace(reason)) return;
+
+        var rejectObj = new { Reason = reason };
+        var response = await Http.PutAsJsonAsync($"api/request/{requestId}/reject", rejectObj);
+        if (response.IsSuccessStatusCode)
+        {
+            message = "Заявку відхилено керівником.";
+            await LoadRequestAsync();
+        }
+        else
+        {
+            var err = await response.Content.ReadAsStringAsync();
+            message = $"Помилка відхилення: {err}";
+        }
+    }
+
+    private async Task ApproveAsEconomist()
+    {
+        if (request == null) return;
+        try
+        {
+            var confirm = await JSRuntime.InvokeAsync<bool>(
+                "confirm",
+                "Ви дійсно бажаєте затвердити цю заявку як економіст?"
+            );
+            if (!confirm) return;
+
+            var response = await Http.PutAsync($"api/request/{requestId}/approve-economist", null);
+            if (response.IsSuccessStatusCode)
+            {
+                message = "Заявку успішно затверджено економістом.";
+                await LoadRequestAsync();
+            }
+            else
+            {
+                var err = await response.Content.ReadAsStringAsync();
+                message = $"Помилка при затвердженні: {err}";
+            }
+        }
+        catch (Exception ex)
+        {
+            message = $"Помилка: {ex.Message}";
+        }
+    }
+
+    private async Task RejectAsEconomist()
+    {
+        if (request == null) return;
+        var reason = await JSRuntime.InvokeAsync<string>("prompt", "Вкажіть причину відхилення:");
+        if (string.IsNullOrWhiteSpace(reason)) return;
+
+        var rejectObj = new { Reason = reason };
+        var response = await Http.PutAsJsonAsync($"api/request/{requestId}/reject-economist", rejectObj);
+        if (response.IsSuccessStatusCode)
+        {
+            message = "Заявку відхилено економістом.";
+            await LoadRequestAsync();
+        }
+        else
+        {
+            var err = await response.Content.ReadAsStringAsync();
+            message = $"Помилка відхилення: {err}";
+        }
+    }
+}

@@ -1,0 +1,250 @@
+﻿@page "/net-needs"
+@attribute [Authorize(Roles = "Economist")]
+@inject HttpClient Http
+
+@using System.Net.Http.Json
+@using AutomationOfPurchases.Shared.DTOs
+
+<h3>Таблиця чистих потреб</h3>
+
+<button class="btn btn-secondary mb-3" @onclick="ToggleFilter">
+    @(showFilter ? "Сховати фільтр" : "Фільтрація")
+</button>
+
+@if (showFilter)
+{
+    <div class="border p-3 mb-3">
+        <div class="row g-3">
+            <div class="col-md-4">
+                <label class="form-label">Назва ТМЦ</label>
+                <input class="form-control"
+                       @bind="filterTmc"
+                       @bind:event="oninput"
+                       placeholder="Введіть назву..." />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Департамент</label>
+                <input class="form-control"
+                       @bind="filterDept"
+                       @bind:event="oninput"
+                       placeholder="Введіть відділ..." />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Замовник</label>
+                <input class="form-control"
+                       @bind="filterUser"
+                       @bind:event="oninput"
+                       placeholder="ПІБ замовника..." />
+            </div>
+        </div>
+
+        <button class="btn btn-primary mt-3" @onclick="ApplyFilter">
+            Застосувати
+        </button>
+    </div>
+}
+
+@if (lists == null)
+{
+    <p>Завантаження...</p>
+}
+else if (!lists.Any())
+{
+    <p>Немає списків у чистих потребах.</p>
+}
+else
+{
+    @foreach (var list in filteredLists)
+    {
+        <div class="card mb-4 shadow-sm">
+            <div class="card-body">
+                <table class="table table-sm align-middle table-striped table-bordered">
+                    <thead class="table-light">
+                        <tr>
+                            <th>ТМЦ</th>
+                            <th style="width:100px;">Одиниця</th>
+                            <th style="width:130px;">Кількість</th>
+                            <th style="width:100px;"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var ag in list.AggregatedItems)
+                        {
+                            <tr>
+                                <td><strong>@ag.ItemName</strong></td>
+                                <td>@ag.StorageUnit</td>
+                                <td>@ag.TotalQuantity</td>
+                                <td>
+                                    <button class="btn btn-sm btn-secondary"
+                                            @onclick="@(() => ToggleExpand(ag))">
+                                        @(ag.IsExpanded ? "Сховати" : "Розкрити")
+                                    </button>
+                                </td>
+                            </tr>
+
+                            @if (ag.IsExpanded)
+                            {
+                                <tr>
+                                    <td colspan="4">
+                                        <table class="table table-bordered table-sm">
+                                            <thead class="table-light">
+                                                <tr>
+                                                    <th>Замовник</th>
+                                                    <th>Відділ</th>
+                                                    <th>Кількість</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                @foreach (var d in ag.Details)
+                                                {
+                                                    <tr>
+                                                        <td>@d.OrderedByFullName</td>
+                                                        <td>@d.DepartmentName</td>
+                                                        <td>@d.Quantity</td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    private List<NetNeedsListExpandedDTO>? lists;
+    private List<NetNeedsListExpandedDTO> filteredLists = new();
+
+    private bool showFilter = false;
+    private string filterTmc = "";
+    private string filterDept = "";
+    private string filterUser = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        // GET /api/netneeds/expanded
+        lists = await Http.GetFromJsonAsync<List<NetNeedsListExpandedDTO>>("api/netneeds/expanded")
+                ?? new List<NetNeedsListExpandedDTO>();
+
+        filteredLists = lists;
+    }
+
+    private void ToggleFilter() => showFilter = !showFilter;
+
+    private void ApplyFilter()
+    {
+        if (lists == null) return;
+
+        var query = lists.AsEnumerable();
+
+        // 1) Фільтр за назвою ТМЦ
+        if (!string.IsNullOrWhiteSpace(filterTmc))
+        {
+            var lowerTmc = filterTmc.ToLower();
+            query = query
+                .Select(l =>
+                {
+                    var filteredAgg = l.AggregatedItems
+                        .Where(ag => ag.ItemName.ToLower().Contains(lowerTmc))
+                        .ToList();
+
+                    return new NetNeedsListExpandedDTO
+                        {
+                            ListId = l.ListId,
+                            CreationDate = l.CreationDate,
+                            NullificationDate = l.NullificationDate,
+                            AggregatedItems = filteredAgg
+                        };
+                })
+                .Where(l => l.AggregatedItems.Any());
+        }
+
+        // 2) Фільтр за департаментом
+        if (!string.IsNullOrWhiteSpace(filterDept))
+        {
+            var lowerDept = filterDept.ToLower();
+            query = query
+                .Select(l =>
+                {
+                    var newAgg = l.AggregatedItems
+                        .Select(ag =>
+                        {
+                            var newDetails = ag.Details
+                                .Where(d => d.DepartmentName.ToLower().Contains(lowerDept))
+                                .ToList();
+
+                            return new NetAggregatedItemDTO
+                                {
+                                    ItemId = ag.ItemId,
+                                    ItemName = ag.ItemName,
+                                    StorageUnit = ag.StorageUnit,
+                                    TotalQuantity = ag.TotalQuantity,
+                                    IsExpanded = ag.IsExpanded,
+                                    Details = newDetails
+                                };
+                        })
+                        .Where(ag => ag.Details.Any())
+                        .ToList();
+
+                    return new NetNeedsListExpandedDTO
+                        {
+                            ListId = l.ListId,
+                            CreationDate = l.CreationDate,
+                            NullificationDate = l.NullificationDate,
+                            AggregatedItems = newAgg
+                        };
+                })
+                .Where(x => x.AggregatedItems.Any());
+        }
+
+        // 3) Фільтр за замовником
+        if (!string.IsNullOrWhiteSpace(filterUser))
+        {
+            var lowerUser = filterUser.ToLower();
+            query = query
+                .Select(l =>
+                {
+                    var newAgg = l.AggregatedItems
+                        .Select(ag =>
+                        {
+                            var newDetails = ag.Details
+                                .Where(d => d.OrderedByFullName.ToLower().Contains(lowerUser))
+                                .ToList();
+
+                            return new NetAggregatedItemDTO
+                                {
+                                    ItemId = ag.ItemId,
+                                    ItemName = ag.ItemName,
+                                    StorageUnit = ag.StorageUnit,
+                                    TotalQuantity = ag.TotalQuantity,
+                                    IsExpanded = ag.IsExpanded,
+                                    Details = newDetails
+                                };
+                        })
+                        .Where(ag => ag.Details.Any())
+                        .ToList();
+
+                    return new NetNeedsListExpandedDTO
+                        {
+                            ListId = l.ListId,
+                            CreationDate = l.CreationDate,
+                            NullificationDate = l.NullificationDate,
+                            AggregatedItems = newAgg
+                        };
+                })
+                .Where(l => l.AggregatedItems.Any());
+        }
+
+        filteredLists = query.ToList();
+    }
+
+    private void ToggleExpand(NetAggregatedItemDTO ag)
+    {
+        ag.IsExpanded = !ag.IsExpanded;
+    }
+}

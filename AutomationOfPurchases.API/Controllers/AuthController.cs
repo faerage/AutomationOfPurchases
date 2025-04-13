@@ -30,12 +30,12 @@ namespace AutomationOfPurchases.API.Controllers
             // 1. Знаходимо користувача за UserName
             var user = await _userManager.FindByNameAsync(model.UserName);
             if (user == null)
-                return Unauthorized("Invalid credentials.");
+                return Unauthorized("Користувача не знайдено.");
 
             // 2. Перевіряємо пароль
             var validPass = await _userManager.CheckPasswordAsync(user, model.Password);
             if (!validPass)
-                return Unauthorized("Invalid credentials.");
+                return Unauthorized("Користувача не знайдено.");
 
             // 3. Збираємо ролі
             var roles = await _userManager.GetRolesAsync(user);

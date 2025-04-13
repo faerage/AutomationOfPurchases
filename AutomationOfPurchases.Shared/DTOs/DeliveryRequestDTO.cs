@@ -9,13 +9,17 @@
 
         public int Quantity { get; set; }
 
-        public int OrderedById { get; set; }
+        public string? OrderedById { get; set; }
         public UserDTO? OrderedBy { get; set; }
 
         public string Warehouse { get; set; } = string.Empty;
 
         public int? RequestItemId { get; set; }
-        // Якщо потрібна інформація про RequestItem
-        // public RequestItemDTO? RequestItem { get; set; }
+
+        // Поля для відображення на фронті (DeliveryRequests.razor):
+        public string ItemName { get; set; } = "";
+        public string OrderedByFullName { get; set; } = "";
+        public string OrderedByDepartmentName { get; set; } = "";
+        public string OrderedByEmail { get; set; } = "";
     }
 }

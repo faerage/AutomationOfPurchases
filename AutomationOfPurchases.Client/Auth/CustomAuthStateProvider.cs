@@ -1,6 +1,9 @@
 ﻿using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.JSInterop;
+using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+
+
 
 namespace AutomationOfPurchases.Client.Auth
 {
@@ -15,29 +18,49 @@ namespace AutomationOfPurchases.Client.Auth
 
         public override async Task<AuthenticationState> GetAuthenticationStateAsync()
         {
-            // Читаємо токен із localStorage
+            // 1) Читаємо токен із LocalStorage
             var token = await _jsRuntime.InvokeAsync<string>("localStorage.getItem", "authToken");
-
-            // Якщо токена немає – створюємо анонімного користувача
             if (string.IsNullOrWhiteSpace(token))
             {
+                // Якщо токена немає — повертаємо анонімного користувача
                 var anonymous = new ClaimsPrincipal(new ClaimsIdentity());
                 return new AuthenticationState(anonymous);
             }
 
-            // Якщо токен є, можна розпарсити його та створити ClaimsIdentity
-            // (Нижче – спрощено. У реальному випадку розбирайте JWT, перевіряйте термін дії і т.д.)
-            var claims = new List<Claim> {
-                new Claim("token", token), // Формальний claim, або ж Name, Role
-                // Наприклад, new Claim(ClaimTypes.Name, "SomeUser");
-            };
+            try
+            {
+                // 2) Розбираємо (декодуємо) JWT без перевірки підпису
+                var handler = new JwtSecurityTokenHandler();
+                var jwt = handler.ReadJwtToken(token);
 
-            var identity = new ClaimsIdentity(claims, "jwtAuth");
-            var user = new ClaimsPrincipal(identity);
-            return new AuthenticationState(user);
+                // 3) Створюємо ClaimsIdentity, вказуючи:
+                //    - nameType, щоб ClaimTypes.Name брався з, наприклад, `sub` чи ін.
+                //    - roleType, щоб ролі бралися з нашого claim типу (наприклад, 
+                //      "http://schemas.microsoft.com/ws/2008/06/identity/claims/role").
+                //    Залежно від того, що у вас у токені, можна підставити інші константи.
+                var identity = new ClaimsIdentity(
+                    claims: jwt.Claims,
+                    authenticationType: "jwtAuth",
+                    nameType: JwtRegisteredClaimNames.Sub, // або "unique_name" чи інший
+                    roleType: "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"
+                );
+
+                // 4) Створюємо ClaimsPrincipal і повертаємо
+                var user = new ClaimsPrincipal(identity);
+                return new AuthenticationState(user);
+            }
+            catch
+            {
+                // Якщо токен "битий" — повертаємо анонімного
+                var anonymous = new ClaimsPrincipal(new ClaimsIdentity());
+                return new AuthenticationState(anonymous);
+            }
         }
 
-        // Викликаємо цей метод після логіну/логауту, щоб повідомити Blazor, що авторизація змінилась
+        /// <summary>
+        /// Викликати цей метод після логіну/логауту, 
+        /// щоб повідомити Blazor, що авторизація змінилася.
+        /// </summary>
         public void NotifyUserAuthenticationStateChanged()
         {
             NotifyAuthenticationStateChanged(GetAuthenticationStateAsync());
