@@ -36,8 +36,11 @@ namespace AutomationOfPurchases.API.Controllers
             if (activeList == null)
                 return Ok(new List<GroupedNeedDTO>()); // або NotFound(...)
 
-            // 2) Групуємо GeneralNeedsItem за ItemId, щоб показати сумарні потреби
+            // ------------------------------------------------------------------
+            // 2) Групуємо GeneralNeedsItem за ItemId, але вже БЕЗ «нульових» рядків
+            // ------------------------------------------------------------------
             var grouped = activeList.Items
+                .Where(it => it.Quantity > 0)                   // *** MOD ***
                 .GroupBy(x => x.ItemId)
                 .Select(g =>
                 {
@@ -50,19 +53,22 @@ namespace AutomationOfPurchases.API.Controllers
                         ItemName = first.Item?.ItemName,
                         StorageUnit = first.Item?.StorageUnit,
                         TotalQuantity = totalQty,
-                        IsExpanded = false, // Для Blazor
+                        IsExpanded = false,
 
-                        Requests = g.Select(x => new DepartmentRequestDTO
-                        {
-                            // У DepartmentRequestDTO.RequestItemId
-                            // тимчасово зберігаємо GeneralNeedsItemId,
-                            // щоб на фронті знати, що саме передати в SatisfyNeedModel:
-                            RequestItemId = x.GeneralNeedsItemId,
-                            DepartmentName = x.OrderedBy?.Department?.DepartmentName ?? "",
-                            OrderedByFullName = x.OrderedBy?.FullName ?? "",
-                            Quantity = x.Quantity,
-                            OrderedById = x.OrderedById
-                        }).ToList()
+                        // лише ті деталі, де Quantity > 0 (додатковий запобіжник)
+                        Requests = g.Where(x => x.Quantity > 0)     // *** MOD ***
+                                    .Select(x => new DepartmentRequestDTO
+                                    {
+                                        // У DepartmentRequestDTO.RequestItemId
+                                        // тимчасово зберігаємо GeneralNeedsItemId,
+                                        // щоб на фронті знати, що саме передати в SatisfyNeedModel:
+                                        RequestItemId = x.GeneralNeedsItemId,
+                                        DepartmentName = x.OrderedBy?.Department?.DepartmentName ?? "",
+                                        OrderedByFullName = x.OrderedBy?.FullName ?? "",
+                                        Quantity = x.Quantity,
+                                        OrderedById = x.OrderedById
+                                    })
+                                    .ToList()
                     };
                 })
                 .Where(gr => gr.TotalQuantity > 0)

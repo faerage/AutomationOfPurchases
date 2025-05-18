@@ -1,7 +1,6 @@
 ﻿@page "/dept-requests"
 @attribute [Authorize(Roles = "DepartmentHead")]
 @inject HttpClient Http
-@inject IJSRuntime JSRuntime
 @inject NavigationManager Navigation
 
 @using AutomationOfPurchases.Shared.DTOs
@@ -10,31 +9,47 @@
 
 <h3>Заявки мого департаменту</h3>
 
-<!-- Перемикач "Показати розглянуті заявки" =>
-     Якщо увімкнути, показуємо ВСІ заявки (крім Draft).
-     Якщо вимкнути, показуємо лише PendingDepartmentHead. -->
-<div class="form-check form-switch mb-3">
-    <input class="form-check-input" type="checkbox" role="switch"
-           id="showReviewedSwitch"
-           @bind="showReviewedRequests" />
-    <label class="form-check-label" for="showReviewedSwitch">
-        Показати розглянуті
-    </label>
-</div>
+<!-- *** MOD *** кнопка показу / ховання блоку фільтрів -->
+<button class="btn btn-secondary mb-3"
+        @onclick="ToggleFilters">
+    @(showFilters ? "Сховати фільтри" : "Показати фільтри")
+</button>
 
-<!-- Поле пошуку за назвою заявки -->
-<div class="mb-3">
-    <label class="form-label">Пошук за назвою заявки:</label>
-    <input type="text" class="form-control" @bind="searchTitle"
-           placeholder="Введіть фрагмент назви" />
-</div>
+@if (showFilters)            
+{
+    <!-- Усі поля фільтрації залишилися без змін -->
+    <div class="form-check form-switch mb-3">
+        <input class="form-check-input" type="checkbox" role="switch"
+               id="showReviewedSwitch"
+               @bind="showReviewedRequests" />
+        <label class="form-check-label" for="showReviewedSwitch">
+            Показати розглянуті
+        </label>
+    </div>
 
-<!-- Поле пошуку за автором заявки -->
-<div class="mb-3">
-    <label class="form-label">Пошук за автором заявки:</label>
-    <input type="text" class="form-control" @bind="searchAuthor"
-           placeholder="Введіть фрагмент імені автора" />
-</div>
+    <div class="mb-3">
+        <label class="form-label">Пошук за назвою заявки:</label>
+        <input type="text" class="form-control" @bind="searchTitle"
+               placeholder="Введіть фрагмент назви" />
+    </div>
+
+    <div class="mb-3">
+        <label class="form-label">Пошук за автором заявки:</label>
+        <input type="text" class="form-control" @bind="searchAuthor"
+               placeholder="Введіть фрагмент імені автора" />
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <label class="form-label">Дата від:</label>
+            <InputDate class="form-control" @bind-Value="filterFromDate" />
+        </div>
+        <div class="col-md-3">
+            <label class="form-label">Дата до:</label>
+            <InputDate class="form-control" @bind-Value="filterToDate" />
+        </div>
+    </div>
+}
 
 @if (requests == null)
 {
@@ -66,7 +81,7 @@ else
                         <td>@r.Title</td>
                         <td>@r.OrderedByFullName</td>
                         <td>@RequestStatusLocalizer.Localize(r.Status)</td>
-                        <td>@r.CreationDate.ToLocalTime()</td>
+                        <td>@r.CreationDate.ToLocalTime():dd.MM.yyyy</td>
                         <td>
                             <button class="btn btn-primary btn-sm"
                                     @onclick="() => ViewRequest(r.RequestId)">
@@ -89,25 +104,19 @@ else
     private List<RequestDTO>? requests;
     private string? message;
 
-    // Перемикач: якщо увімкнений => показуємо всі (крім Draft),
-    // якщо вимкнений => лише PendingDepartmentHead
+    private bool showFilters = false;          // *** MOD ***
     private bool showReviewedRequests = false;
-
-    // Поля пошуку
     private string? searchTitle;
     private string? searchAuthor;
+    private DateTime? filterFromDate;
+    private DateTime? filterToDate;
 
-    protected override async Task OnInitializedAsync()
-    {
-        await LoadRequestsAsync();
-    }
+    protected override async Task OnInitializedAsync() => await LoadRequestsAsync();
 
     private async Task LoadRequestsAsync()
     {
-        message = null;
         try
         {
-            // GET: api/request/department
             requests = await Http.GetFromJsonAsync<List<RequestDTO>>("api/request/department");
         }
         catch (Exception ex)
@@ -116,48 +125,35 @@ else
         }
     }
 
-    private void ViewRequest(int requestId)
-    {
-        // Переходимо на сторінку деталей
+    private void ToggleFilters() => showFilters = !showFilters;   // *** MOD ***
+
+    private void ViewRequest(int requestId) =>
         Navigation.NavigateTo($"/request-details/{requestId}");
-    }
 
     private IEnumerable<RequestDTO> GetFilteredRequests()
     {
-        if (requests == null)
-            return Enumerable.Empty<RequestDTO>();
+        if (requests == null) return Enumerable.Empty<RequestDTO>();
 
         var query = requests.AsEnumerable();
 
-        // Якщо перемикач вимкнено (showReviewedRequests == false),
-        // показуємо лише ті, що в статусі PendingDepartmentHead
-        if (!showReviewedRequests)
-        {
-            query = query.Where(r => r.Status == RequestStatus.PendingDepartmentHead);
-        }
-        else
-        {
-            // Якщо перемикач увімкнено,
-            // показуємо всі заявки, крім Draft
-            query = query.Where(r => r.Status != RequestStatus.Draft);
-        }
+        query = showReviewedRequests
+            ? query.Where(r => r.Status != RequestStatus.Draft)
+            : query.Where(r => r.Status == RequestStatus.PendingDepartmentHead);
 
-        // Пошук за назвою заявки
         if (!string.IsNullOrWhiteSpace(searchTitle))
-        {
-            var lower = searchTitle.ToLower();
-            query = query.Where(r => (r.Title ?? "").ToLower().Contains(lower));
-        }
+            query = query.Where(r => (r.Title ?? "")
+                .Contains(searchTitle, StringComparison.OrdinalIgnoreCase));
 
-        // Пошук за автором заявки
         if (!string.IsNullOrWhiteSpace(searchAuthor))
-        {
-            var lowerAuth = searchAuthor.ToLower();
-            query = query.Where(r => (r.OrderedByFullName ?? "").ToLower().Contains(lowerAuth));
-        }
+            query = query.Where(r => (r.OrderedByFullName ?? "")
+                .Contains(searchAuthor, StringComparison.OrdinalIgnoreCase));
 
-        query = query.OrderByDescending(r => r.CreationDate);
+        if (filterFromDate.HasValue)
+            query = query.Where(r => r.CreationDate.Date >= filterFromDate.Value.Date);
 
-        return query;
+        if (filterToDate.HasValue)
+            query = query.Where(r => r.CreationDate.Date <= filterToDate.Value.Date);
+
+        return query.OrderByDescending(r => r.CreationDate);
     }
 }

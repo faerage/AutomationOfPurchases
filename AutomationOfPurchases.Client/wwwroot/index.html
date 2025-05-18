@@ -3,7 +3,8 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AutomationOfPurchases.Client</title>
+    <title>Закупівлі</title>
+    <link rel="shortcut icon" href="icon-192.png">
     <base href="/" />
 
     <!-- Ваш app.css (якщо треба) -->
@@ -27,10 +28,19 @@
         <a class="dismiss">🗙</a>
     </div>
 
+    <!-- 1. Chart.js 4.4.0 — оновлений (коректний) SHA‑384 у `integrity` -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"
+            integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g"
+            crossorigin="anonymous"></script>
+
+    <!-- 2. Ваш скрипт, що створює графіки (після Chart.js) -->
+    <script src="js/ecoAnalytics.js"></script>
+
     <!-- Blazor WebAssembly Script -->
     <script src="_framework/blazor.webassembly.js"></script>
 
     <!-- **Bootstrap JS** -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"
 </body>
 </html>
