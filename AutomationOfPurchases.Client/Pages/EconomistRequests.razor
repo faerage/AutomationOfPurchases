@@ -82,7 +82,7 @@ else
                         <td>@r.OrderedByFullName</td>
                         <td>@r.OrderedByDepartmentName</td>
                         <td>@RequestStatusLocalizer.Localize(r.Status)</td>
-                        <td>@r.CreationDate.ToLocalTime():dd.MM.yyyy</td>
+                        <td>@r.CreationDate.ToLocalTime()</td>
                         <td>
                             <button class="btn btn-primary btn-sm"
                                     @onclick="() => ViewRequest(r.RequestId)">
