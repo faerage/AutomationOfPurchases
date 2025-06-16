@@ -61,15 +61,14 @@ else if (filteredItems.Any())
                     @if (demoItemsWithData.Contains(item.ItemId))
                     {
                         <div class="mb-4 border p-2">
+                            <a2>Орієнтовна кількість ТМЦ що будуть замовлені в наступному місяці - @demoForecast[item.ItemId] (@item.StorageUnit)</a2>
+                        </div>
+                        <div class="mb-4 border p-2">
                             <canvas id="statusChart_@item.ItemId" height="240"></canvas>
                         </div>
 
                         <div class="mb-4 border p-2">
                             <canvas id="decChart_@item.ItemId" height="240"></canvas>
-                        </div>
-
-                        <div class="mb-4 border p-2">
-                            <canvas id="profitChart_@item.ItemId" height="240"></canvas>
                         </div>
                     }
                     @* ── даних нема — показуємо повідомлення ── *@
@@ -142,10 +141,12 @@ else
                     new[] { 8, 15, 12, 14, 10, 11, 9, 16, 10, 8, 13, 9 }
                 )
         };
-
-    // 3) прибуток — однаковий
-    private readonly int[] demoProfitCommon =
-        new[] { 12, 15, 10, 18, 14, 11, 16, 9, 13, 17, 12, 19 };
+    // ↳ прогноз на наступний місяць
+    private readonly Dictionary<int, int> demoForecast = new()
+        {
+            [1] = 43,   // ItemId == 1
+            [2] = 15    // ItemId == 2
+        };
 
     private readonly HashSet<int> demoItemsWithData;
 
@@ -177,7 +178,6 @@ else
                 demoRejected[id],
                 demoDecisions[id].WarehouseQty,
                 demoDecisions[id].PurchaseQty,
-                demoProfitCommon,
                 item.StorageUnit);
 
             rendered.Add(id);

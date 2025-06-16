@@ -31,7 +31,6 @@ export function drawCharts(itemId,
     rejected,
     warehouseQty,
     purchaseQty,
-    profit,
     unit) {
 
     disposeCharts(itemId);             // якщо графіки вже існували
@@ -69,22 +68,6 @@ export function drawCharts(itemId,
                 options: buildOptions(`Кількість, ${unit}`, 'Рішення')
             }));
 
-    /* ---- прибуток ---- */
-    charts[itemId].push(
-        new Chart(
-            document.getElementById(`profitChart_${itemId}`),
-            {
-                type: 'line',
-                data: {
-                    labels,
-                    datasets: [{
-                        label: 'Прибуток (тис. ₴)',
-                        data: profit,
-                        fill: false
-                    }]
-                },
-                options: buildOptions('тис. ₴', 'Прибуток')
-            }));
 }
 
 /* ---- очищення при згортанні карти ---- */
